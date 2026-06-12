@@ -229,6 +229,42 @@ mod tests {
         assert_eq!(scan.reclaimable_bytes(), node_modules.size_on_disk);
     }
 
+    /// Mirrors the `/tmp` smoke test (issue #6): a matched Reinstallable plus a
+    /// large unknown sibling. The unknown surfaces as Unclassified (ADR-0001
+    /// fail-safe) and is excluded from the reclaimable total, which counts only
+    /// the node_modules.
+    #[test]
+    fn matched_and_unknown_split_into_reclaimable_and_unclassified() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // Matched: a node_modules tree → Reinstallable.
+        let nm = root.join("proj").join("node_modules");
+        fs::create_dir_all(&nm).unwrap();
+        fs::write(nm.join("index.js"), vec![0u8; 128 * 1024]).unwrap();
+
+        // Unknown: a large dir no Rule matches → Unclassified.
+        let mystery = root.join("mystery");
+        fs::create_dir(&mystery).unwrap();
+        fs::write(mystery.join("blob"), vec![0u8; 256 * 1024]).unwrap();
+
+        let scan = run(root, &Ruleset::defaults(), 64 * 1024);
+
+        let node_modules = item_for(&scan, "node_modules");
+        assert_eq!(node_modules.class, SafetyClass::Reinstallable);
+        assert!(node_modules.may_reclaim());
+
+        let mystery_item = item_for(&scan, "mystery");
+        assert_eq!(mystery_item.class, SafetyClass::Unclassified);
+        assert!(
+            !mystery_item.may_reclaim(),
+            "Unclassified is surfaced but not offered (ADR-0001)",
+        );
+
+        // Reclaimable total counts the Reinstallable, never the Unclassified.
+        assert_eq!(scan.reclaimable_bytes(), node_modules.size_on_disk);
+    }
+
     /// Acceptance for issue #3: a large unknown nested *below* a directory that
     /// also holds a matched Item is surfaced as a single Unclassified subtree.
     /// The old top-level-only Pass 2 skipped the whole branch and never found it.

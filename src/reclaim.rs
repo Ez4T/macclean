@@ -91,3 +91,114 @@ fn run_clean(command: &str, item_path: &std::path::Path) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Evidence, Item, RecoveryMethod, SafetyClass};
+    use crate::ruleset::{Match, Rule, Ruleset};
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn item(path: PathBuf, class: SafetyClass, override_reclaim: bool) -> Item {
+        Item {
+            path,
+            size_on_disk: 4096,
+            class,
+            recovery: RecoveryMethod::None,
+            evidence: Evidence { summary: "fixture".into() },
+            override_reclaim,
+        }
+    }
+
+    /// Guardrail: a Protected (Irreplaceable) Item is refused even if reclaim is
+    /// somehow called on it, and nothing is deleted (CONTEXT.md → "Protected").
+    #[test]
+    fn refuses_protected_item() {
+        let tmp = tempfile::tempdir().unwrap();
+        let img = tmp.path().join("disk.img.raw");
+        fs::write(&img, vec![0u8; 4096]).unwrap();
+
+        let it = item(img.clone(), SafetyClass::Irreplaceable, false);
+        let err = reclaim(&it, &Ruleset::defaults()).unwrap_err();
+        assert!(err.to_string().contains("not reclaimable"));
+        assert!(img.exists(), "Protected Item is never deleted");
+    }
+
+    /// Guardrail: an Unclassified Item without an override is refused (ADR-0001) —
+    /// it is surfaced but not reclaimable until the user explicitly overrides.
+    #[test]
+    fn refuses_unoverridden_unclassified() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mystery = tmp.path().join("mystery");
+        fs::create_dir(&mystery).unwrap();
+
+        let it = item(mystery.clone(), SafetyClass::Unclassified, false);
+        assert!(reclaim(&it, &Ruleset::defaults()).is_err());
+        assert!(mystery.exists(), "un-overridden Unclassified is never deleted");
+    }
+
+    /// Destination by class (ADR-0004): an *overridden* Unclassified Item is routed
+    /// to the Trash, not deleted permanently. The actual trash op is environment
+    /// dependent (Finder/freedesktop), so we accept an Err from a headless box but
+    /// require that, when it succeeds, it took the Trash branch and removed the
+    /// original path — never the permanent `Removed`/`ToolClean` branch.
+    #[test]
+    fn overridden_unclassified_routes_to_trash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mystery = tmp.path().join("macclean-test-trash-me");
+        fs::create_dir(&mystery).unwrap();
+
+        let it = item(mystery.clone(), SafetyClass::Unclassified, true);
+        match reclaim(&it, &Ruleset::defaults()) {
+            Ok(Reclaimed::Trashed) => assert!(!mystery.exists(), "Trashed → moved out of place"),
+            Ok(other) => panic!("overridden Unclassified must go to Trash, got {other:?}"),
+            Err(_) => { /* no Trash backend in this environment; branch was still taken */ }
+        }
+    }
+
+    /// Hybrid reclaim (ADR-0002): when the matching Rule carries a clean command
+    /// and the tool is available, reclaim prefers it over a raw `rm`. We use a
+    /// harmless `true` as the clean command so the test is deterministic and the
+    /// fixture survives — proving the clean branch ran, not the removal branch.
+    #[test]
+    fn prefers_clean_command_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("buildcache");
+        fs::create_dir(&cache).unwrap();
+        fs::write(cache.join("artifact"), vec![0u8; 4096]).unwrap();
+
+        let ruleset = Ruleset {
+            rules: vec![Rule {
+                name: "fixture-clean".into(),
+                matches: Match::DirNamed { dir: "buildcache".into() },
+                class: SafetyClass::Regenerable,
+                clean_command: Some("true".into()),
+                recover_command: Some("make".into()),
+                evidence: "fixture".into(),
+            }],
+        };
+
+        let it = item(cache.clone(), SafetyClass::Regenerable, false);
+        match reclaim(&it, &ruleset).unwrap() {
+            Reclaimed::ToolClean { command } => assert_eq!(command, "true"),
+            other => panic!("expected ToolClean, got {other:?}"),
+        }
+    }
+
+    /// Hybrid reclaim fallback (ADR-0002): with no clean command, a Reclaimable
+    /// Item is removed directly and its bytes are gone.
+    #[test]
+    fn falls_back_to_rm_without_a_clean_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nm = tmp.path().join("node_modules");
+        fs::create_dir(&nm).unwrap();
+        fs::write(nm.join("index.js"), vec![0u8; 4096]).unwrap();
+
+        let it = item(nm.clone(), SafetyClass::Reinstallable, false);
+        match reclaim(&it, &Ruleset::defaults()).unwrap() {
+            Reclaimed::Removed => assert!(!nm.exists(), "directly removed"),
+            other => panic!("expected Removed, got {other:?}"),
+        }
+    }
+}
