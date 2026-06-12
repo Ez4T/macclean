@@ -6,7 +6,12 @@ use crate::model::SafetyClass;
 use serde::{Deserialize, Serialize};
 
 /// What a [`Rule`] looks for on disk (CONTEXT.md → "Rule", the match condition).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Every variant is plain data so the whole Ruleset stays serializable (ADR-0003);
+/// the matching logic that interprets them lives in [`crate::classify`]. The last
+/// three variants are the richer conditions from issue #8 — a name glob and the
+/// `All`/`Any` combinators — which compose the simpler ones declaratively.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Match {
     /// A directory whose name equals `dir`, sitting beside a file named
     /// `sibling` (e.g. `target/` next to `Cargo.toml`).
@@ -25,12 +30,23 @@ pub enum Match {
     /// (e.g. a `PG_VERSION` marker identifying a PostgreSQL data directory).
     /// The contained file is the Evidence; the matched Item is the directory.
     DirContainingFile { file: String },
+    /// An Item whose own name matches a shell-style glob with `*` (any run of
+    /// characters) and `?` (any one character) — e.g. `*.zst`, `core.*`,
+    /// `?cache`. Richer than [`Match::NameSuffix`] for single-file Items whose
+    /// name isn't just a fixed extension.
+    NameGlob { pattern: String },
+    /// Matches only when *every* nested condition matches (logical AND). Lets a
+    /// Rule require, say, a name glob *and* a sibling marker.
+    All { of: Vec<Match> },
+    /// Matches when *any* nested condition matches (logical OR). Lets one Rule
+    /// cover several spellings of the same thing (e.g. `*.zst` or `*.zstd`).
+    Any { of: Vec<Match> },
 }
 
 /// A single declarative classification entry (CONTEXT.md → "Rule"). Maps a
 /// [`Match`] to a [`SafetyClass`] and, for Regenerable/Reinstallable, the clean
 /// command that defines its Recovery Method (ADR-0002).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Rule {
     pub name: String,
     pub matches: Match,
@@ -47,7 +63,7 @@ pub struct Rule {
 }
 
 /// The collection of Rules the classifier applies (CONTEXT.md → "Ruleset").
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Ruleset {
     pub rules: Vec<Rule>,
 }
@@ -290,5 +306,71 @@ mod tests {
     #[test]
     fn malformed_user_toml_is_an_error_not_a_panic() {
         assert!(Ruleset::defaults().with_user_rules("this is = not valid").is_err());
+    }
+
+    // --- Richer Match conditions round-trip through TOML (issue #8) ---
+
+    /// A Ruleset using every new Match kind (NameGlob plus nested All/Any
+    /// combinators) survives a serialize → deserialize round-trip unchanged —
+    /// the acceptance for issue #8.
+    #[test]
+    fn richer_matches_round_trip_through_toml() {
+        let original = Ruleset {
+            rules: vec![
+                Rule {
+                    name: "zstd-archives".into(),
+                    matches: Match::NameGlob { pattern: "*.zst".into() },
+                    class: SafetyClass::RedundantCopy,
+                    clean_command: None,
+                    recover_command: None,
+                    evidence: "A zstd archive recognized by extension glob.".into(),
+                },
+                Rule {
+                    name: "guarded-cache".into(),
+                    matches: Match::All {
+                        of: vec![
+                            Match::DirNamed { dir: "cache".into() },
+                            Match::Any {
+                                of: vec![
+                                    Match::NameSuffix { suffix: ".cache".into() },
+                                    Match::DirContainingFile { file: "CACHEDIR.TAG".into() },
+                                ],
+                            },
+                        ],
+                    },
+                    class: SafetyClass::Cache,
+                    clean_command: None,
+                    recover_command: None,
+                    evidence: "A cache dir guarded by a name and a marker.".into(),
+                },
+            ],
+        };
+
+        let toml_text = toml::to_string(&original).expect("serialize");
+        let parsed: Ruleset = toml::from_str(&toml_text).expect("deserialize");
+        assert_eq!(parsed, original, "new Match kinds must round-trip losslessly");
+    }
+
+    /// The hand-written, user-facing TOML form for the new kinds parses and merges
+    /// like any other user Rule (ADR-0003 keeps rules as data).
+    #[test]
+    fn hand_written_glob_and_combinator_toml_parse() {
+        let user_toml = r#"
+            [[rules]]
+            name = "zstd-or-zstandard"
+            class = "RedundantCopy"
+            evidence = "zstd archive"
+            matches.Any.of = [
+              { NameGlob = { pattern = "*.zst" } },
+              { NameGlob = { pattern = "*.zstd" } },
+            ]
+        "#;
+        let merged = Ruleset::defaults().with_user_rules(user_toml).unwrap();
+        let added = merged.rules.first().expect("user rule is first");
+        assert_eq!(added.name, "zstd-or-zstandard");
+        assert!(
+            matches!(&added.matches, Match::Any { of } if of.len() == 2),
+            "Any combinator parsed with both globs",
+        );
     }
 }
