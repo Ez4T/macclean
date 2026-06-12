@@ -73,6 +73,24 @@ pub enum RecoveryMethod {
     None,
 }
 
+impl RecoveryMethod {
+    /// A short human sentence describing how a reclaimed Item is restored, shown
+    /// in the TUI detail line and the Confirm prompt (CONTEXT.md → "Recovery
+    /// Method"). Pure to the method; for the Trash safety-net of an overridden
+    /// Unclassified Item see [`Item::recovery_line`].
+    pub fn describe(&self) -> String {
+        match self {
+            RecoveryMethod::Rebuild { command } => format!("rebuild via `{command}`"),
+            RecoveryMethod::Reinstall { command } => format!("reinstall via `{command}`"),
+            RecoveryMethod::AutoRefill => "refills automatically on next use".into(),
+            RecoveryMethod::SurvivingCopy { original } => {
+                format!("the surviving copy at {}", original.display())
+            }
+            RecoveryMethod::None => "not recoverable".into(),
+        }
+    }
+}
+
 /// The concrete proof the Scan used to assign a Safety Class (CONTEXT.md →
 /// "Evidence"). Always shown alongside the class so the user can trust or
 /// override it.
@@ -103,6 +121,17 @@ impl Item {
     pub fn may_reclaim(&self) -> bool {
         self.class.is_reclaimable()
             || (self.class == SafetyClass::Unclassified && self.override_reclaim)
+    }
+
+    /// One-line "how you get it back" shown for the highlighted Item and quoted
+    /// in the Confirm prompt. An overridden `Unclassified` Item has no Recovery
+    /// Method of its own but goes to the Trash (ADR-0004), recoverable from there,
+    /// so describe that destination rather than its `None` method.
+    pub fn recovery_line(&self) -> String {
+        if self.class == SafetyClass::Unclassified {
+            return "moved to Trash on Reclaim — restorable from there".into();
+        }
+        self.recovery.describe()
     }
 }
 

@@ -35,9 +35,12 @@ fallback) · `reclaim.rs` (hybrid clean + destination) · `tui.rs` (ratatui UI).
 
 <what-to-do>
 
-1. Identify the target issue. If the user gave a number, use it; otherwise run
-   `gh issue list` and prefer the lowest-numbered P1. Read it fully with
-   `gh issue view <N>` — implement to its acceptance criteria.
+1. Work exactly **one** issue per invocation. Identify the target: if the user
+   gave a number, use it; otherwise run `gh issue list` and prefer the
+   lowest-numbered P1. **If there are no open issues, do not branch or change
+   anything — report "All issues done" and stop (this ends any loop).** Read the
+   chosen issue fully with `gh issue view <N>` and implement to its acceptance
+   criteria.
 2. Create a branch (`git checkout -b issue-<N>-short-slug`). Never commit
    straight to `main` unless the user says so.
 3. Implement, keeping identifiers aligned with CONTEXT.md and honoring every
@@ -49,11 +52,33 @@ fallback) · `reclaim.rs` (hybrid clean + destination) · `tui.rs` (ratatui UI).
    - Smoke-test against a temp fixture, e.g.
      `cargo run -- scan --root /tmp/<fixture> --min-unclassified-mb 1`.
      Build the fixture so the behavior under test actually triggers.
-5. Commit atomically with a message that references the issue, then open a PR
-   (or commit to `main` if the user requested it) and close the issue
-   (`gh issue close <N>` or `Closes #<N>` in the PR).
+5. Commit atomically with a message that references the issue, push the branch,
+   and open a PR whose body contains `Closes #<N>`. Then **auto-merge it**:
+   - `cargo build` and `cargo test` MUST be green first — this is the merge gate.
+     If either fails, leave the PR open, comment why, and stop. Do not merge.
+   - Merge with `gh pr merge <PR> --squash --delete-branch`. The `Closes #<N>`
+     trailer closes the issue on merge.
+   - `git checkout main && git pull` so the next iteration starts from the merged
+     state.
 
 </what-to-do>
+
+<afk-loop>
+
+This skill does **one** issue per run, so it composes with `/loop` for AFK
+operation. To drain the backlog unattended, the user runs:
+
+```
+/loop use the work-issue skill to implement the next open issue, PR it, and auto-merge
+```
+
+Self-paced (no interval) is correct: finish one issue, then continue to the next,
+and **stop when step 1 finds no open issues**. Between iterations, always start
+from a clean, up-to-date `main`. If an iteration is blocked (failing gate,
+ambiguous acceptance criteria, or a change that would contradict an ADR), stop the
+loop and surface it rather than guessing or merging broken code.
+
+</afk-loop>
 
 <guardrails>
 
