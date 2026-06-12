@@ -50,8 +50,9 @@ terminal column (issue #7); the sorted-bar form is what stays readable.
 | `scan.rs` | Filesystem measurement; **actual on-disk size**, not apparent (ADR-0006) |
 | `ruleset.rs` | Data-driven `Rule`/`Ruleset` + curated defaults (ADR-0003) |
 | `classify.rs` | Applies the ruleset; fail-safe to `Unclassified` (ADR-0001) |
+| `dedup.rs` | Post-classification Redundant Copy detection (size pre-filter + blake3) |
 | `reclaim.rs` | Hybrid clean + destination-by-class (ADR-0002, ADR-0004) |
-| `tui.rs` | Enriched navigable list (ratatui) |
+| `tui.rs` | Enriched navigable list + on-disk-size overview pane (ratatui) |
 
 ## Extending the ruleset
 
@@ -101,8 +102,10 @@ matches.Any.of = [
 
 ## Status
 
-Scaffold. The Scan → Classify → Reclaim pipeline and the TUI are functional, with
-a toggleable on-disk-size overview pane (`t`) and a rich, composable set of Rule
-match kinds (globs and AND/OR combinators). Not yet built: Redundant Copy
-detection (blake3 checksum comparison — the `trash` crate and `blake3` dep are
-wired in). This is the natural next step and is not blocked by the decisions above.
+The Scan → Classify → Reclaim pipeline is functional end-to-end, including
+post-classification Redundant Copy detection (`dedup.rs`: an on-disk-size
+pre-filter confirmed by blake3, run as a second pass over the Scan). The TUI
+offers an enriched navigable list, a toggleable on-disk-size overview pane (`t`),
+and the deliberate Confirm gate; the Ruleset supports a rich, composable set of
+match kinds (globs and AND/OR combinators). Every roadmap item named so far is
+implemented and covered by the test suite (`cargo test`).
