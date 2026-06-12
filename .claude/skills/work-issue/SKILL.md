@@ -57,12 +57,14 @@ fallback) · `reclaim.rs` (hybrid clean + destination) · `tui.rs` (ratatui UI).
 
 <guardrails>
 
-- **Do NOT run macclean against the real `$HOME`** until issue #1 (the
-  Irreplaceable/Protected guardrail) is implemented. Use temp fixtures.
+- **Never run macclean's reclaim against the real `$HOME`** in automated runs —
+  always use temp fixtures. Verification scans/deletes happen only inside throwaway
+  directories.
 - Reclaim must never delete a Protected item, nor an Unclassified item without an
   explicit override — preserve these guardrails in any change.
-- Priority order: #1 and #2 (the P1s) make the Protected guardrail real and add
-  Redundant Copy detection — do them before the P2/P3 polish.
+- **Never merge a red build.** `cargo build` + `cargo test` green is a hard gate
+  before auto-merge; when in doubt, leave the PR open and stop.
+- Priority order: always take the lowest-numbered open P1 first, then P2, then P3.
 - End commit messages with:
   `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`
 
