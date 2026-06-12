@@ -1,0 +1,33 @@
+[package]
+name = "mac-clean"
+version = "0.1.0"
+edition = "2021"
+description = "A TUI that surfaces disk usage and classifies each item by safety class before reclaiming space."
+
+[[bin]]
+name = "macclean"
+path = "src/main.rs"
+
+[dependencies]
+# Scan
+jwalk = "0.8"           # parallel directory walking
+blake3 = "1"            # fast checksums for Redundant Copy detection
+
+# Ruleset (data-driven, ADR-0003)
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# Reclaim (ADR-0002, ADR-0004)
+trash = "5"             # macOS Trash for the Unclassified-override path
+
+# CLI + TUI
+clap = { version = "4", features = ["derive"] }
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Errors
+anyhow = "1"
+
+[profile.release]
+lto = true
+strip = true
