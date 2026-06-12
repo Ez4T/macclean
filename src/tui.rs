@@ -113,7 +113,7 @@ fn confirm_reclaim(state: &mut AppState) {
         Ok(done) => {
             let how = match done {
                 Reclaimed::ToolClean { command } => format!("cleaned via `{command}`"),
-                Reclaimed::RemovedDir => "removed".into(),
+                Reclaimed::Removed => "removed".into(),
                 Reclaimed::Trashed => "moved to Trash".into(),
             };
             state.status = format!("Reclaimed {} ({how}).", human(item.size_on_disk));

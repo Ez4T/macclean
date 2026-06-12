@@ -15,7 +15,7 @@ use std::process::Command;
 #[derive(Debug)]
 pub enum Reclaimed {
     ToolClean { command: String },
-    RemovedDir,
+    Removed,
     Trashed,
 }
 
@@ -49,9 +49,16 @@ pub fn reclaim(item: &Item, ruleset: &Ruleset) -> Result<Reclaimed> {
         }
     }
 
-    std::fs::remove_dir_all(&item.path)
-        .with_context(|| format!("removing {}", item.path.display()))?;
-    Ok(Reclaimed::RemovedDir)
+    // A Reclaimable Item may be a file (e.g. a Redundant Copy of a disk image),
+    // not only a directory tree, so remove whichever it is.
+    if item.path.is_dir() {
+        std::fs::remove_dir_all(&item.path)
+            .with_context(|| format!("removing {}", item.path.display()))?;
+    } else {
+        std::fs::remove_file(&item.path)
+            .with_context(|| format!("removing {}", item.path.display()))?;
+    }
+    Ok(Reclaimed::Removed)
 }
 
 /// First whitespace token of the command is the executable; check it resolves.
