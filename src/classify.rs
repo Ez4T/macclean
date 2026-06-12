@@ -92,38 +92,79 @@ pub fn run(root: &Path, ruleset: &Ruleset, min_unclassified: u64) -> Scan {
         }
     }
 
-    // Pass 2: top-level children of root that are large, unmatched, and contain
-    // no matched Item become Unclassified (ADR-0001 fail-safe).
+    // Pass 2: surface the largest unmatched subtrees as Unclassified, recursing
+    // past any directory that holds a matched Item so a deeply nested unknown is
+    // still found even when its ancestors contain matched data (ADR-0001
+    // fail-safe). Root's own matched children are skipped — they are already
+    // Items.
     if let Ok(read) = std::fs::read_dir(root) {
         for child in read.filter_map(Result::ok) {
             let cpath = child.path();
             if !cpath.is_dir() {
                 continue;
             }
-            let is_matched = matched_prefixes.iter().any(|p| p == &cpath);
-            let has_matched_descendant =
-                matched_prefixes.iter().any(|p| p.starts_with(&cpath) && p != &cpath);
-            if is_matched || has_matched_descendant {
+            if matched_prefixes.iter().any(|p| p == &cpath) {
                 continue;
             }
-            let size = on_disk_size(&cpath);
-            if size >= min_unclassified {
-                items.push(Item {
-                    size_on_disk: size,
-                    class: SafetyClass::Unclassified,
-                    recovery: RecoveryMethod::None,
-                    evidence: Evidence {
-                        summary: "Large, but no Rule matched — inspect before deleting.".into(),
-                    },
-                    override_reclaim: false,
-                    path: cpath,
-                });
-            }
+            surface_unclassified(&cpath, &matched_prefixes, min_unclassified, &mut items);
         }
     }
 
     items.sort_by(|a, b| b.size_on_disk.cmp(&a.size_on_disk));
     Scan { root: root.to_path_buf(), items }
+}
+
+/// Recursively surface the largest unmatched subtrees at or below `dir` as
+/// `Unclassified` Items (ADR-0001). `dir` is always an unmatched directory.
+///
+/// - If `dir` contains *no* matched Item, the whole subtree is unknown, so it is
+///   surfaced as a single Unclassified Item when it meets `min_unclassified` and
+///   not descended into — this is what keeps nested unknowns from being double
+///   counted against their parent.
+/// - If `dir` *does* contain a matched Item, it can't be surfaced whole (the
+///   matched parts aren't Unclassified), so we descend into its child
+///   directories — skipping matched Items, which are pruned as their own units —
+///   to surface the unmatched subtrees nested within.
+fn surface_unclassified(
+    dir: &Path,
+    matched_prefixes: &[std::path::PathBuf],
+    min_unclassified: u64,
+    items: &mut Vec<Item>,
+) {
+    let has_matched_descendant = matched_prefixes
+        .iter()
+        .any(|p| p.starts_with(dir) && p != dir);
+
+    if !has_matched_descendant {
+        let size = on_disk_size(dir);
+        if size >= min_unclassified {
+            items.push(Item {
+                size_on_disk: size,
+                class: SafetyClass::Unclassified,
+                recovery: RecoveryMethod::None,
+                evidence: Evidence {
+                    summary: "Large, but no Rule matched — inspect before deleting.".into(),
+                },
+                override_reclaim: false,
+                path: dir.to_path_buf(),
+            });
+        }
+        return;
+    }
+
+    if let Ok(read) = std::fs::read_dir(dir) {
+        for child in read.filter_map(Result::ok) {
+            let cpath = child.path();
+            if !cpath.is_dir() {
+                continue;
+            }
+            // A matched Item is its own unit — never folded into an Unclassified.
+            if matched_prefixes.iter().any(|p| p == &cpath) {
+                continue;
+            }
+            surface_unclassified(&cpath, matched_prefixes, min_unclassified, items);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -186,5 +227,53 @@ mod tests {
 
         // Reclaimable total counts node_modules but neither Irreplaceable Item.
         assert_eq!(scan.reclaimable_bytes(), node_modules.size_on_disk);
+    }
+
+    /// Acceptance for issue #3: a large unknown nested *below* a directory that
+    /// also holds a matched Item is surfaced as a single Unclassified subtree.
+    /// The old top-level-only Pass 2 skipped the whole branch and never found it.
+    #[test]
+    fn nested_unknown_under_a_matched_branch_is_surfaced() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // One top-level dir holding BOTH a matched Item and a nested unknown.
+        let workspace = root.join("workspace");
+        fs::create_dir(&workspace).unwrap();
+
+        // Matched: a Rust target/ beside a Cargo.toml (Regenerable).
+        let proj = workspace.join("proj");
+        fs::create_dir(&proj).unwrap();
+        fs::write(proj.join("Cargo.toml"), b"[package]\n").unwrap();
+        let target = proj.join("target");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("blob"), vec![0u8; 64 * 1024]).unwrap();
+
+        // Unknown: a deeply nested dir no Rule matches, sitting beside `proj`.
+        let bigdata = workspace.join("bigdata");
+        let nested = bigdata.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        fs::write(nested.join("blob"), vec![0u8; 256 * 1024]).unwrap();
+
+        let scan = run(root, &Ruleset::defaults(), 64 * 1024);
+
+        // The matched target/ is still classified as its own unit.
+        assert_eq!(item_for(&scan, "target").class, SafetyClass::Regenerable);
+
+        // Exactly one Unclassified Item, and it is the largest clean subtree
+        // (`bigdata`) — not its `nested` child (no descent past a clean tree),
+        // and not `workspace` (which holds matched data, so it isn't surfaced
+        // whole and isn't double-counted).
+        let unclassified: Vec<&Item> = scan
+            .items
+            .iter()
+            .filter(|i| i.class == SafetyClass::Unclassified)
+            .collect();
+        assert_eq!(unclassified.len(), 1, "exactly one Unclassified subtree");
+        assert_eq!(
+            unclassified[0].path.file_name().and_then(|n| n.to_str()),
+            Some("bigdata"),
+        );
+        assert!(!unclassified[0].may_reclaim());
     }
 }
