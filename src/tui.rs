@@ -313,9 +313,11 @@ fn draw_confirm(f: &mut Frame, item: &Item) {
 }
 
 /// A horizontally-centered rectangle `percent_x` wide and `height` tall, clamped
-/// to `area`. Used to float the Confirm modal over the list.
+/// to `area`. Used to float the Confirm modal over the list. The width math is
+/// done in `u32` so a wide terminal (`area.width * percent_x > u16::MAX`, i.e.
+/// past ~1023 columns) can't overflow and panic on resize.
 fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
-    let width = area.width * percent_x / 100;
+    let width = (area.width as u32 * percent_x as u32 / 100).min(area.width as u32) as u16;
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     Rect { x, y, width, height: height.min(area.height) }
@@ -420,6 +422,99 @@ mod tests {
         let mut state = state_with(vec![item]);
         handle_key(&mut state, KeyCode::Char('c'));
         assert!(matches!(state.mode, Mode::Browse));
+    }
+
+    /// Empty-list edge case: navigation, override, and confirm keypresses must be
+    /// no-ops that never panic and never select anything (issue #5).
+    #[test]
+    fn empty_list_keys_are_safe_noops() {
+        let mut state = state_with(vec![]);
+        assert_eq!(state.list.selected(), None);
+
+        for code in [
+            KeyCode::Down,
+            KeyCode::Up,
+            KeyCode::Char('o'),
+            KeyCode::Char('c'),
+            KeyCode::Enter,
+        ] {
+            assert!(!handle_key(&mut state, code));
+            assert!(matches!(state.mode, Mode::Browse));
+            assert_eq!(state.list.selected(), None, "nothing to select in an empty list");
+        }
+    }
+
+    /// Last-item-removed edge case: reclaiming the only Item empties the list and
+    /// clears the selection rather than leaving a dangling index (issue #5).
+    #[test]
+    fn reclaiming_last_item_clears_selection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nm = tmp.path().join("node_modules");
+        fs::create_dir(&nm).unwrap();
+
+        let mut state = state_with(vec![node_modules_item(nm)]);
+        do_reclaim(&mut state, 0);
+
+        assert!(state.scan.items.is_empty());
+        assert_eq!(state.list.selected(), None);
+    }
+
+    /// Removing the highlighted last-of-many Item walks the selection back onto a
+    /// still-valid index instead of pointing past the end (issue #5).
+    #[test]
+    fn reclaiming_tail_item_keeps_selection_in_range() {
+        let tmp = tempfile::tempdir().unwrap();
+        let items: Vec<Item> = (0..3)
+            .map(|n| {
+                let p = tmp.path().join(format!("nm{n}"));
+                fs::create_dir(&p).unwrap();
+                node_modules_item(p)
+            })
+            .collect();
+
+        let mut state = state_with(items);
+        state.list.select(Some(2)); // highlight the tail
+        do_reclaim(&mut state, 2);
+
+        assert_eq!(state.scan.items.len(), 2);
+        let sel = state.list.selected().expect("selection survives");
+        assert!(sel < state.scan.items.len(), "selection stays in range");
+    }
+
+    /// Navigation wraps both ways and stays in range (issue #5).
+    #[test]
+    fn move_sel_wraps_around() {
+        let tmp = tempfile::tempdir().unwrap();
+        let items: Vec<Item> = (0..3)
+            .map(|n| node_modules_item(tmp.path().join(format!("nm{n}"))))
+            .collect();
+        let mut state = state_with(items);
+
+        move_sel(&mut state, -1); // wrap from 0 back to the tail
+        assert_eq!(state.list.selected(), Some(2));
+        move_sel(&mut state, 1); // wrap from tail back to head
+        assert_eq!(state.list.selected(), Some(0));
+    }
+
+    /// Resize edge case: the Confirm modal geometry must not overflow on a very
+    /// wide terminal and must stay clamped inside the area (issue #5).
+    #[test]
+    fn centered_rect_survives_wide_terminal() {
+        let area = Rect { x: 0, y: 0, width: 4000, height: 50 };
+        let r = centered_rect(64, 9, area);
+        assert!(r.width <= area.width);
+        assert!(r.x + r.width <= area.x + area.width);
+        assert!(r.y + r.height <= area.y + area.height);
+    }
+
+    /// A modal taller than the terminal is clamped to the available height instead
+    /// of drawing off-screen (issue #5).
+    #[test]
+    fn centered_rect_clamps_to_short_terminal() {
+        let area = Rect { x: 0, y: 0, width: 80, height: 4 };
+        let r = centered_rect(64, 9, area);
+        assert!(r.height <= area.height);
+        assert!(r.y + r.height <= area.y + area.height);
     }
 
     /// The recovery line shown for the highlighted Item reflects both the Recovery
