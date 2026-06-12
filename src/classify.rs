@@ -41,7 +41,49 @@ fn matches_path(m: &Match, path: &Path, is_dir: bool) -> bool {
         // Suffix conditions apply to files and directories alike.
         Match::PathSuffix { suffix } => path.to_string_lossy().ends_with(suffix.as_str()),
         Match::NameSuffix { suffix } => name.ends_with(suffix.as_str()),
+        // A `*`/`?` glob over the Item's own name (issue #8).
+        Match::NameGlob { pattern } => glob_match(pattern, name),
+        // Combinators (issue #8): the file type is threaded through unchanged so
+        // nested `Dir*` conditions still see whether the Item is a directory.
+        Match::All { of } => of.iter().all(|m| matches_path(m, path, is_dir)),
+        Match::Any { of } => of.iter().any(|m| matches_path(m, path, is_dir)),
     }
+}
+
+/// Shell-style glob match supporting `*` (any run, including empty) and `?` (any
+/// single character); every other character is literal. Used by
+/// [`Match::NameGlob`]. A small two-pointer matcher so the Ruleset needs no glob
+/// crate and stays pure data (ADR-0003).
+fn glob_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    let (mut pi, mut ti) = (0usize, 0usize);
+    // `star` remembers the last `*` so we can backtrack; `mark` is where in the
+    // text that `*` is currently assumed to stop consuming.
+    let (mut star, mut mark) = (None, 0usize);
+
+    while ti < t.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == t[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = ti;
+            pi += 1;
+        } else if let Some(s) = star {
+            // Mismatch under a `*`: let the `*` swallow one more character.
+            pi = s + 1;
+            mark += 1;
+            ti = mark;
+        } else {
+            return false;
+        }
+    }
+    // Trailing `*`s in the pattern can still match the empty remainder.
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
 }
 
 fn recovery_for(rule: &Rule) -> RecoveryMethod {
@@ -227,6 +269,94 @@ mod tests {
 
         // Reclaimable total counts node_modules but neither Irreplaceable Item.
         assert_eq!(scan.reclaimable_bytes(), node_modules.size_on_disk);
+    }
+
+    // --- Richer Match conditions (issue #8) ---
+
+    use crate::ruleset::Match;
+
+    fn rule(name: &str, matches: Match) -> Rule {
+        Rule {
+            name: name.into(),
+            matches,
+            class: SafetyClass::Cache,
+            clean_command: None,
+            recover_command: None,
+            evidence: "fixture".into(),
+        }
+    }
+
+    #[test]
+    fn glob_match_handles_star_and_question() {
+        assert!(glob_match("*.zst", "archive.tar.zst"));
+        assert!(glob_match("core.*", "core.12345"));
+        assert!(glob_match("?cache", "Xcache"));
+        assert!(glob_match("*", "anything"));
+        assert!(glob_match("a*b*c", "axxbyyc"));
+        assert!(glob_match("exact", "exact"));
+
+        assert!(!glob_match("*.zst", "archive.tar.gz"));
+        assert!(!glob_match("?cache", "cache")); // ? needs exactly one char
+        assert!(!glob_match("core.*", "core")); // literal dot must be present
+        assert!(!glob_match("a*c", "abx"));
+    }
+
+    #[test]
+    fn name_glob_rule_matches_by_wildcard() {
+        let rs = Ruleset {
+            rules: vec![rule("zst-archives", Match::NameGlob { pattern: "*.zst".into() })],
+        };
+        // A single-file Item recognized by extension glob (issue #8 `*.zst` case).
+        assert_eq!(
+            match_rule_typed(&rs, Path::new("/d/backup.tar.zst"), false).unwrap().name,
+            "zst-archives",
+        );
+        assert!(match_rule_typed(&rs, Path::new("/d/backup.tar.gz"), false).is_none());
+    }
+
+    #[test]
+    fn all_combinator_requires_every_condition() {
+        // Match only a directory named `build` that also contains a `marker` file.
+        let rs = Ruleset {
+            rules: vec![rule(
+                "guarded-build",
+                Match::All {
+                    of: vec![
+                        Match::DirNamed { dir: "build".into() },
+                        Match::DirContainingFile { file: "marker".into() },
+                    ],
+                },
+            )],
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let build = tmp.path().join("build");
+        fs::create_dir(&build).unwrap();
+
+        // Name matches but the marker is missing → AND fails.
+        assert!(match_rule_typed(&rs, &build, true).is_none());
+
+        // Add the marker → both conditions hold.
+        fs::write(build.join("marker"), b"x").unwrap();
+        assert_eq!(match_rule_typed(&rs, &build, true).unwrap().name, "guarded-build");
+    }
+
+    #[test]
+    fn any_combinator_matches_either_spelling() {
+        let rs = Ruleset {
+            rules: vec![rule(
+                "zstd-either",
+                Match::Any {
+                    of: vec![
+                        Match::NameGlob { pattern: "*.zst".into() },
+                        Match::NameGlob { pattern: "*.zstd".into() },
+                    ],
+                },
+            )],
+        };
+        assert_eq!(match_rule_typed(&rs, Path::new("/a.zst"), false).unwrap().name, "zstd-either");
+        assert_eq!(match_rule_typed(&rs, Path::new("/a.zstd"), false).unwrap().name, "zstd-either");
+        assert!(match_rule_typed(&rs, Path::new("/a.gz"), false).is_none());
     }
 
     /// Mirrors the `/tmp` smoke test (issue #6): a matched Reinstallable plus a

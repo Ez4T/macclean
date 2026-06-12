@@ -70,10 +70,39 @@ evidence = "build.gradle sits beside this build/ — Gradle build output."
 DirBesideSibling = { dir = "build", sibling = "build.gradle" }
 ```
 
+### Match kinds
+
+A Rule's `matches` is one of these declarative, serializable conditions:
+
+| Kind | Matches |
+|---|---|
+| `DirNamed { dir }` | a directory with this name |
+| `DirBesideSibling { dir, sibling }` | a directory named `dir` next to a file `sibling` |
+| `DirContainingFile { file }` | a directory directly containing this marker file |
+| `PathSuffix { suffix }` | any Item whose full path ends with this string |
+| `NameSuffix { suffix }` | any Item whose name ends with this string (fixed extension) |
+| `NameGlob { pattern }` | any Item whose name matches a `*`/`?` glob (e.g. `*.zst`) |
+| `All { of = [ … ] }` | every nested condition matches (logical AND) |
+| `Any { of = [ … ] }` | any nested condition matches (logical OR) |
+
+The last three are the richer conditions added for single-file items and
+composition. Combinators nest, so a Rule can require a glob *and* a marker:
+
+```toml
+[[rules]]
+name = "zstd-or-zstandard"
+class = "RedundantCopy"
+evidence = "A zstd archive recognized by extension."
+matches.Any.of = [
+  { NameGlob = { pattern = "*.zst" } },
+  { NameGlob = { pattern = "*.zstd" } },
+]
+```
+
 ## Status
 
 Scaffold. The Scan → Classify → Reclaim pipeline and the TUI are functional, with
-a toggleable on-disk-size overview pane (`t`). Not yet built: Redundant Copy
+a toggleable on-disk-size overview pane (`t`) and a rich, composable set of Rule
+match kinds (globs and AND/OR combinators). Not yet built: Redundant Copy
 detection (blake3 checksum comparison — the `trash` crate and `blake3` dep are
-wired in) and richer Rule match conditions. These are the natural next steps and
-none are blocked by the decisions above.
+wired in). This is the natural next step and is not blocked by the decisions above.
