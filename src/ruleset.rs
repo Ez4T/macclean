@@ -17,6 +17,14 @@ pub enum Match {
     /// A directory whose name equals `dir`, regardless of siblings
     /// (e.g. `node_modules`).
     DirNamed { dir: String },
+    /// An Item (file or directory) whose own name ends with `suffix`
+    /// (e.g. `.qcow2`, `.img.raw`). Used to recognize files by extension,
+    /// such as VM disk images.
+    NameSuffix { suffix: String },
+    /// A directory that directly contains a child file named `file`
+    /// (e.g. a `PG_VERSION` marker identifying a PostgreSQL data directory).
+    /// The contained file is the Evidence; the matched Item is the directory.
+    DirContainingFile { file: String },
 }
 
 /// A single declarative classification entry (CONTEXT.md → "Rule"). Maps a
@@ -111,6 +119,50 @@ impl Ruleset {
                     None,
                     None,
                     "uv cache — refilled automatically on next use.",
+                ),
+                // Irreplaceable data → Protected (CONTEXT.md, ADR-0001). These make
+                // real, non-recoverable data recognized as data rather than relying
+                // on the Unclassified backstop. None carry a Recovery Method; none
+                // are ever offered for deletion.
+                r(
+                    "vm-disk-image-raw",
+                    Match::NameSuffix { suffix: ".img.raw".into() },
+                    SafetyClass::Irreplaceable,
+                    None,
+                    None,
+                    "A raw VM/container disk image (.img.raw) — live volume, not regenerable from any command.",
+                ),
+                r(
+                    "vm-disk-image-qcow2",
+                    Match::NameSuffix { suffix: ".qcow2".into() },
+                    SafetyClass::Irreplaceable,
+                    None,
+                    None,
+                    "A QEMU/qcow2 VM disk image — live volume, not regenerable from any command.",
+                ),
+                r(
+                    "vm-disk-image-vdi",
+                    Match::NameSuffix { suffix: ".vdi".into() },
+                    SafetyClass::Irreplaceable,
+                    None,
+                    None,
+                    "A VirtualBox VDI disk image — live volume, not regenerable from any command.",
+                ),
+                r(
+                    "vm-disk-image-vmdk",
+                    Match::NameSuffix { suffix: ".vmdk".into() },
+                    SafetyClass::Irreplaceable,
+                    None,
+                    None,
+                    "A VMware VMDK disk image — live volume, not regenerable from any command.",
+                ),
+                r(
+                    "postgres-data-dir",
+                    Match::DirContainingFile { file: "PG_VERSION".into() },
+                    SafetyClass::Irreplaceable,
+                    None,
+                    None,
+                    "A PG_VERSION marker sits here — this is a live PostgreSQL data directory.",
                 ),
             ],
         }
