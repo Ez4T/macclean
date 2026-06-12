@@ -3,6 +3,7 @@
 //! vocabulary and docs/adr/ for the decisions behind the design.
 
 mod classify;
+mod dedup;
 mod model;
 mod reclaim;
 mod ruleset;
@@ -75,7 +76,10 @@ fn main() -> Result<()> {
     let ruleset = load_ruleset();
     let min = cli.min_unclassified_mb * 1024 * 1024;
 
-    let scan = classify::run(&root, &ruleset, min);
+    let mut scan = classify::run(&root, &ruleset, min);
+    // Second pass: relabel byte-identical duplicates as Redundant Copy so the
+    // surviving original is the one kept (CONTEXT.md → "Redundant Copy").
+    dedup::analyze(&mut scan);
 
     match cli.command {
         Some(Command::Scan) => {
