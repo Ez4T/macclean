@@ -42,6 +42,9 @@ struct AppState {
     list: ListState,
     mode: Mode,
     status: String,
+    /// Whether the proportional on-disk-usage overview pane is shown to the left
+    /// of the action list (issue #7). Off by default; toggled with `t`.
+    show_overview: bool,
 }
 
 pub fn run(scan: Scan, ruleset: Ruleset) -> Result<()> {
@@ -57,7 +60,8 @@ pub fn run(scan: Scan, ruleset: Ruleset) -> Result<()> {
         scan,
         ruleset,
         mode: Mode::Browse,
-        status: "↑/↓ move · o override Unclassified · c/Enter Confirm reclaim · q quit".into(),
+        status: "↑/↓ move · o override · t overview · c/Enter Confirm reclaim · q quit".into(),
+        show_overview: false,
     };
 
     let result = event_loop(&mut terminal, &mut state);
@@ -99,6 +103,7 @@ fn handle_key(state: &mut AppState, code: KeyCode) -> bool {
         KeyCode::Down | KeyCode::Char('j') => move_sel(state, 1),
         KeyCode::Up | KeyCode::Char('k') => move_sel(state, -1),
         KeyCode::Char('o') => toggle_override(state),
+        KeyCode::Char('t') => toggle_overview(state),
         KeyCode::Char('c') | KeyCode::Enter => request_confirm(state),
         _ => {}
     }
@@ -128,6 +133,15 @@ fn toggle_override(state: &mut AppState) {
     } else {
         state.status = format!("{} cannot be overridden.", item.class.label());
     }
+}
+
+fn toggle_overview(state: &mut AppState) {
+    state.show_overview = !state.show_overview;
+    state.status = if state.show_overview {
+        "Overview pane on — bars scaled by on-disk size (t to hide).".into()
+    } else {
+        "Overview pane off.".into()
+    };
 }
 
 /// First step of a Reclaim: if the highlighted Item may be reclaimed, open the
@@ -223,13 +237,25 @@ fn draw(f: &mut Frame, state: &AppState) {
         })
         .collect();
 
+    // Optional overview pane (issue #7): split the body so a proportional
+    // on-disk-usage bar chart sits to the left of the action list. The list keeps
+    // the remaining width, so the action surface is never crowded out.
+    let list_area = if state.show_overview {
+        let [overview, list] =
+            Layout::horizontal([Constraint::Percentage(34), Constraint::Min(24)]).areas(body);
+        draw_overview(f, state, overview);
+        list
+    } else {
+        body
+    };
+
     let mut list_state = state.list.clone();
     f.render_stateful_widget(
         List::new(rows)
             .block(Block::default().borders(Borders::ALL).title(" Items "))
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED))
             .highlight_symbol("▶ "),
-        body,
+        list_area,
         &mut list_state,
     );
 
@@ -257,6 +283,60 @@ fn draw(f: &mut Frame, state: &AppState) {
             draw_confirm(f, item);
         }
     }
+}
+
+/// The overview pane (issue #7): one proportional bar per Item, scaled so the
+/// largest on-disk Item fills the pane and the rest are relative to it, coloured
+/// by Safety Class. A 1-D "block treemap" — the spike found a true 2-D squarified
+/// treemap illegible in a narrow terminal column, so this sorted-bar form is what
+/// stays readable. The highlighted Item is marked to tie the two panes together.
+fn draw_overview(f: &mut Frame, state: &AppState, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Overview · on-disk size ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    // Items are size-sorted descending, so the first is the largest — the scale.
+    let max_size = state.scan.items.first().map(|i| i.size_on_disk).unwrap_or(0);
+    // Reserve space for the "▶ " marker (2) and the right-aligned size label (7).
+    let bar_max = inner.width.saturating_sub(9);
+    let selected = state.list.selected();
+
+    let lines: Vec<Line> = state
+        .scan
+        .items
+        .iter()
+        .enumerate()
+        .take(inner.height as usize)
+        .map(|(i, it)| {
+            let cells = bar_cells(it.size_on_disk, max_size, bar_max);
+            let marker = if selected == Some(i) { "▶ " } else { "  " };
+            Line::from(vec![
+                Span::raw(marker),
+                Span::styled(format!("{:>6} ", human(it.size_on_disk)), Style::default().bold()),
+                Span::styled(
+                    "█".repeat(cells as usize),
+                    Style::default().fg(class_color(it.class)),
+                ),
+            ])
+        })
+        .collect();
+
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Filled block cells for an Item's overview bar, scaled so the largest Item
+/// (`max_size`) fills `max_width` and the rest are proportional to it. Any
+/// non-empty Item gets at least one cell so it never visually disappears; a
+/// zero-size Item or a zero scale/width yields zero (issue #7).
+fn bar_cells(size: u64, max_size: u64, max_width: u16) -> u16 {
+    if size == 0 || max_size == 0 || max_width == 0 {
+        return 0;
+    }
+    let frac = size as f64 / max_size as f64;
+    let cells = (frac * max_width as f64).round() as u16;
+    cells.clamp(1, max_width)
 }
 
 /// The deliberate Confirm prompt: quotes the Item's path, size, class, and how it
@@ -341,6 +421,7 @@ mod tests {
             list,
             mode: Mode::Browse,
             status: String::new(),
+            show_overview: false,
         }
     }
 
@@ -494,6 +575,33 @@ mod tests {
         assert_eq!(state.list.selected(), Some(2));
         move_sel(&mut state, 1); // wrap from tail back to head
         assert_eq!(state.list.selected(), Some(0));
+    }
+
+    /// The overview pane toggles on and off with `t` and starts hidden (issue #7).
+    #[test]
+    fn overview_toggles_with_t() {
+        let mut state = state_with(vec![node_modules_item(PathBuf::from("/tmp/node_modules"))]);
+        assert!(!state.show_overview, "overview starts hidden");
+        handle_key(&mut state, KeyCode::Char('t'));
+        assert!(state.show_overview, "t shows the overview");
+        handle_key(&mut state, KeyCode::Char('t'));
+        assert!(!state.show_overview, "t hides it again");
+    }
+
+    /// The overview bar scale (issue #7): the largest Item fills the pane, others
+    /// are proportional, any non-empty Item keeps at least one cell, and a zero
+    /// scale/size/width can never divide-by-zero or overflow the width.
+    #[test]
+    fn bar_cells_scales_proportionally_and_safely() {
+        assert_eq!(bar_cells(100, 100, 20), 20, "largest fills the pane");
+        assert_eq!(bar_cells(50, 100, 20), 10, "half size → half width");
+        assert_eq!(bar_cells(1, 1_000_000, 20), 1, "tiny Item keeps one cell");
+        assert_eq!(bar_cells(0, 100, 20), 0, "empty Item draws nothing");
+        assert_eq!(bar_cells(50, 0, 20), 0, "zero scale never divides by zero");
+        assert_eq!(bar_cells(50, 100, 0), 0, "zero width draws nothing");
+        // Monotonic in size and never wider than the pane.
+        assert!(bar_cells(30, 100, 20) <= bar_cells(60, 100, 20));
+        assert!(bar_cells(u64::MAX, 100, 20) <= 20);
     }
 
     /// Resize edge case: the Confirm modal geometry must not overflow on a very
