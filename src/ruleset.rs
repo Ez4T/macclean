@@ -179,3 +179,116 @@ impl Ruleset {
         Ok(self)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::classify::match_rule_typed;
+    use std::fs;
+    use std::path::Path;
+
+    // Match-condition coverage (issue #6). Each `Match` variant is exercised
+    // through the public matcher so the data-driven Ruleset (ADR-0003) is proven
+    // end-to-end, not just deserialized.
+
+    #[test]
+    fn dir_named_matches_only_directories_by_name() {
+        let rs = Ruleset::defaults();
+        // node_modules as a directory matches the Reinstallable Rule…
+        let rule = match_rule_typed(&rs, Path::new("/x/node_modules"), true)
+            .expect("node_modules dir should match");
+        assert_eq!(rule.name, "node-modules");
+        assert_eq!(rule.class, SafetyClass::Reinstallable);
+        // …but a *file* named node_modules does not (DirNamed is dir-only).
+        assert!(match_rule_typed(&rs, Path::new("/x/node_modules"), false).is_none());
+    }
+
+    #[test]
+    fn dir_beside_sibling_requires_the_sibling_on_disk() {
+        let rs = Ruleset::defaults();
+        let tmp = tempfile::tempdir().unwrap();
+        let proj = tmp.path().join("proj");
+        let target = proj.join("target");
+        fs::create_dir_all(&target).unwrap();
+
+        // Without the Cargo.toml sibling, the target/ dir is unrecognized.
+        assert!(
+            match_rule_typed(&rs, &target, true).is_none(),
+            "target/ alone must not match — the sibling is the Evidence",
+        );
+
+        // With Cargo.toml beside it, the Rust build-output Rule fires.
+        fs::write(proj.join("Cargo.toml"), b"[package]\n").unwrap();
+        let rule = match_rule_typed(&rs, &target, true).expect("target beside Cargo.toml matches");
+        assert_eq!(rule.name, "rust-target");
+        assert_eq!(rule.class, SafetyClass::Regenerable);
+        assert_eq!(rule.clean_command.as_deref(), Some("cargo clean"));
+    }
+
+    #[test]
+    fn path_suffix_matches_well_known_cache_locations() {
+        let rs = Ruleset::defaults();
+        let rule = match_rule_typed(&rs, Path::new("/home/me/.cache/uv"), true)
+            .expect(".cache/uv should match the uv cache Rule");
+        assert_eq!(rule.name, "uv-cache");
+        assert_eq!(rule.class, SafetyClass::Cache);
+        // A path that merely contains the fragment mid-string does not end with it.
+        assert!(match_rule_typed(&rs, Path::new("/home/.cache/uv/blobs"), true).is_none());
+    }
+
+    #[test]
+    fn name_suffix_recognizes_vm_images_as_irreplaceable() {
+        let rs = Ruleset::defaults();
+        let rule = match_rule_typed(&rs, Path::new("/vm/disk.qcow2"), false)
+            .expect(".qcow2 should match");
+        assert_eq!(rule.class, SafetyClass::Irreplaceable);
+        assert!(rule.clean_command.is_none(), "Irreplaceable carries no clean command");
+    }
+
+    #[test]
+    fn dir_containing_file_recognizes_a_postgres_data_dir() {
+        let rs = Ruleset::defaults();
+        let tmp = tempfile::tempdir().unwrap();
+        let pg = tmp.path().join("pgdata");
+        fs::create_dir(&pg).unwrap();
+
+        assert!(match_rule_typed(&rs, &pg, true).is_none(), "no PG_VERSION marker yet");
+        fs::write(pg.join("PG_VERSION"), b"16\n").unwrap();
+        let rule = match_rule_typed(&rs, &pg, true).expect("PG_VERSION marker matches");
+        assert_eq!(rule.class, SafetyClass::Irreplaceable);
+    }
+
+    /// User-rule precedence (ADR-0003): a user Rule is evaluated before the
+    /// bundled defaults, so it can reclassify a path the defaults already cover.
+    #[test]
+    fn user_rules_take_precedence_over_defaults() {
+        // Default ruleset classifies node_modules as Reinstallable.
+        let defaults = Ruleset::defaults();
+        assert_eq!(
+            match_rule_typed(&defaults, Path::new("/x/node_modules"), true)
+                .unwrap()
+                .class,
+            SafetyClass::Reinstallable,
+        );
+
+        // A user rule re-labels node_modules as Cache; it must win on first-match.
+        let user_toml = r#"
+            [[rules]]
+            name = "treat-node-modules-as-cache"
+            class = "Cache"
+            evidence = "user override"
+
+            [rules.matches]
+            DirNamed = { dir = "node_modules" }
+        "#;
+        let merged = Ruleset::defaults().with_user_rules(user_toml).unwrap();
+        let rule = match_rule_typed(&merged, Path::new("/x/node_modules"), true).unwrap();
+        assert_eq!(rule.name, "treat-node-modules-as-cache");
+        assert_eq!(rule.class, SafetyClass::Cache, "user rule overrides the default");
+    }
+
+    #[test]
+    fn malformed_user_toml_is_an_error_not_a_panic() {
+        assert!(Ruleset::defaults().with_user_rules("this is = not valid").is_err());
+    }
+}
