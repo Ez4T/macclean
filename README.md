@@ -23,8 +23,13 @@ cargo build --release
 ./target/release/macclean --full-disk
 ```
 
-In the TUI: `↑/↓` move · `o` override an Unclassified item · `c` Confirm reclaim ·
-`q` quit.
+In the TUI: `↑/↓` move · `o` override an Unclassified item · `t` toggle the
+on-disk-size overview pane · `c` Confirm reclaim · `q` quit.
+
+The overview pane (`t`) shows a proportional bar per Item — a 1-D "block treemap"
+scaled so the largest on-disk Item fills the column, colour-coded by Safety Class.
+A true 2-D squarified treemap was spiked and dropped as illegible in a narrow
+terminal column (issue #7); the sorted-bar form is what stays readable.
 
 ## Safety classes
 
@@ -67,8 +72,8 @@ DirBesideSibling = { dir = "build", sibling = "build.gradle" }
 
 ## Status
 
-Scaffold. The Scan → Classify → Reclaim pipeline and the TUI are functional. Not
-yet built: Redundant Copy detection (blake3 checksum comparison — the `trash`
-crate and `blake3` dep are wired in), richer Rule match conditions, and a
-treemap overview. These are the natural next steps and none are blocked by the
-decisions above.
+Scaffold. The Scan → Classify → Reclaim pipeline and the TUI are functional, with
+a toggleable on-disk-size overview pane (`t`). Not yet built: Redundant Copy
+detection (blake3 checksum comparison — the `trash` crate and `blake3` dep are
+wired in) and richer Rule match conditions. These are the natural next steps and
+none are blocked by the decisions above.
