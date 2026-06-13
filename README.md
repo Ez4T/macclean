@@ -8,6 +8,13 @@ Confirm.
 See [`CONTEXT.md`](./CONTEXT.md) for the vocabulary and [`docs/adr/`](./docs/adr)
 for the decisions behind the design.
 
+> [!WARNING]
+> **Use entirely at your own risk.** macclean reclaims space by **deleting files**.
+> It is a personal research project provided **as-is, with no warranty** — the author
+> does **not** guarantee it is safe and accepts **no liability** if it deletes data you
+> wanted or otherwise harms your device. There is **no support** and **no commercial
+> use**. See [Disclaimer](#disclaimer) and [License](#license) before running it.
+
 ## Install
 
 No Rust, no Homebrew, no sudo — one line on any Mac:
@@ -137,3 +144,31 @@ offers an enriched navigable list, a toggleable on-disk-size overview pane (`t`)
 and the deliberate Confirm gate; the Ruleset supports a rich, composable set of
 match kinds (globs and AND/OR combinators). Every roadmap item named so far is
 implemented and covered by the test suite (`cargo test`).
+
+## Disclaimer
+
+macclean is a **personal research project**, built and shared by the author for
+their own learning. It is **not a product**. By using it you accept the following:
+
+- **No warranty, no guarantee of safety.** The software is provided *as-is*. It
+  reclaims space by **deleting files**, and the author does **not** guarantee it
+  will not delete data you wanted, corrupt files, or otherwise harm your device.
+  You use it **entirely at your own risk**, and the author is **not liable** for
+  any loss or damage of any kind. Back up anything you cannot afford to lose.
+- **No support.** No feature is officially supported. There is **no commitment**
+  to maintain it, fix bugs, answer questions, accept contributions, or respond to
+  issues. It may change or stop working at any time.
+- **No data collection or retention.** macclean runs **entirely on your machine**.
+  It makes **no network calls**, includes **no telemetry or analytics**, and
+  **collects, transmits, and retains no personal data** — nothing ever leaves your
+  device.
+- **Non-commercial only.** It is provided for personal, research, and other
+  non-commercial purposes. **Commercial use is not permitted** — see [License](#license).
+
+## License
+
+Licensed under the **[PolyForm Noncommercial License 1.0.0](./LICENSE)**. You may
+use, study, modify, and share macclean for **non-commercial** purposes; **commercial
+use is not permitted**. This is a *source-available* license — not an OSI-approved
+"open source" license, because it restricts commercial use. The full warranty and
+liability disclaimer in the [LICENSE](./LICENSE) governs your use.

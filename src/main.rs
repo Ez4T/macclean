@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ruleset::Ruleset;
 use scan::human;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "macclean", version, about = "Classify and reclaim disk usage, safely.")]
@@ -70,19 +70,23 @@ fn load_ruleset() -> Ruleset {
     base
 }
 
+fn run_scan(root: &Path, ruleset: &Ruleset, min: u64) -> model::Scan {
+    let mut scan = classify::run(root, ruleset, min);
+    // Second pass: relabel byte-identical duplicates as Redundant Copy so the
+    // surviving original is the one kept (CONTEXT.md → "Redundant Copy").
+    dedup::analyze(&mut scan);
+    scan
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let root = resolve_root(&cli)?;
     let ruleset = load_ruleset();
     let min = cli.min_unclassified_mb * 1024 * 1024;
 
-    let mut scan = classify::run(&root, &ruleset, min);
-    // Second pass: relabel byte-identical duplicates as Redundant Copy so the
-    // surviving original is the one kept (CONTEXT.md → "Redundant Copy").
-    dedup::analyze(&mut scan);
-
     match cli.command {
         Some(Command::Scan) => {
+            let scan = run_scan(&root, &ruleset, min);
             println!("Scan of {}", scan.root.display());
             for item in &scan.items {
                 println!(
@@ -95,6 +99,6 @@ fn main() -> Result<()> {
             println!("Reclaimable now: {}", human(scan.reclaimable_bytes()));
             Ok(())
         }
-        None => tui::run(scan, ruleset),
+        None => tui::run_scanning(root, ruleset, min),
     }
 }
