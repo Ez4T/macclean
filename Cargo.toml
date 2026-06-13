@@ -3,6 +3,11 @@ name = "mac-clean"
 version = "0.1.0"
 edition = "2021"
 description = "A TUI that surfaces disk usage and classifies each item by safety class before reclaiming space."
+authors = ["Tanarat <tanarats7717@gmail.com>"]
+repository = "https://github.com/Ez4T/macclean"
+license = "PolyForm-Noncommercial-1.0.0"
+readme = "README.md"
+publish = false
 
 [[bin]]
 name = "macclean"
