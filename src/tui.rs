@@ -15,6 +15,7 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{
@@ -52,8 +53,16 @@ enum View {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ConfirmTarget {
-    Item { index: usize },
-    Group { class: SafetyClass },
+    Item {
+        index: usize,
+    },
+    Group {
+        class: SafetyClass,
+    },
+    /// The persistent multi-selection built across groups with `Space`/`a`
+    /// (issue #26). The set itself lives in [`AppState::selected`]; this variant
+    /// only routes the Confirm modal and the reclaim worker.
+    Selection,
 }
 
 /// Which screen the TUI is showing. Reclaim is a two-step: a reclaim keypress in
@@ -124,6 +133,11 @@ struct AppState {
     mode: Mode,
     reclaim_job: Option<ReclaimJob>,
     status: String,
+    /// Persistent multi-selection for batch Reclaim, keyed by Item path so it
+    /// survives Items being removed after a Reclaim (issue #26). Invariant: every
+    /// path here belongs to a currently-Reclaimable Item (`may_reclaim()`); it is
+    /// pruned by [`prune_selection`] whenever Items change or an override clears.
+    selected: HashSet<PathBuf>,
     /// Whether the proportional on-disk-usage overview pane is shown to the left
     /// of the action list (issue #7). Off by default; toggled with `t`.
     show_overview: bool,
@@ -141,7 +155,10 @@ impl AppState {
             item_list: ListState::default(),
             mode: Mode::Browse,
             reclaim_job: None,
-            status: "↑/↓ move · Enter open group · c Confirm group · t overview · q quit".into(),
+            status:
+                "↑/↓ move · Space select · a all · Enter open · c Confirm · t overview · q quit"
+                    .into(),
+            selected: HashSet::new(),
             show_overview: false,
         }
     }
@@ -233,6 +250,8 @@ fn sync_selection_after_items_changed(state: &mut AppState) {
 
     let group_count = group_summaries(&state.scan).len();
     clamp_list_selection(&mut state.group_list, group_count);
+
+    prune_selection(state);
 }
 
 fn item_word(count: usize) -> &'static str {
@@ -373,6 +392,8 @@ fn handle_key(state: &mut AppState, code: KeyCode) -> bool {
         KeyCode::Left | KeyCode::Backspace | KeyCode::Char('b') => back_to_groups(state),
         KeyCode::Right => open_selected_group(state),
         KeyCode::Char('o') => toggle_override(state),
+        KeyCode::Char(' ') => toggle_selection(state),
+        KeyCode::Char('a') => toggle_select_all(state),
         KeyCode::Char('t') => toggle_overview(state),
         KeyCode::Char('c') => request_confirm(state),
         KeyCode::Enter => match state.view {
@@ -504,6 +525,15 @@ fn toggle_overview(state: &mut AppState) {
 /// open the Confirm modal; otherwise explain why it can't and stay in Browse.
 /// Nothing is deleted here.
 fn request_confirm(state: &mut AppState) {
+    // A non-empty selection takes precedence regardless of view: `c` Confirms the
+    // whole built-up set (issue #26). An empty selection keeps today's behavior so
+    // the feature is purely additive.
+    if !state.selected.is_empty() {
+        state.mode = Mode::Confirm {
+            target: ConfirmTarget::Selection,
+        };
+        return;
+    }
     match state.view {
         View::Groups => request_group_confirm(state),
         View::Items { .. } => request_item_confirm(state),
@@ -555,6 +585,225 @@ fn request_item_confirm(state: &mut AppState) {
     };
 }
 
+/// Rank of a Safety Class in [`CLASS_ORDER`], used to process a Selection Reclaim
+/// in the same deterministic order the Confirm breakdown lists (issue #26).
+fn class_rank(class: SafetyClass) -> usize {
+    CLASS_ORDER
+        .iter()
+        .position(|&c| c == class)
+        .unwrap_or(CLASS_ORDER.len())
+}
+
+/// Drop any selected path that is no longer a currently-Reclaimable Item, holding
+/// the invariant that the selection is always a subset of `may_reclaim()` Items
+/// (issue #26). Reclaimed Items (removed from the Scan) and Items whose override
+/// was just cleared fall out here; failed or untouched Items stay selected.
+fn prune_selection(state: &mut AppState) {
+    if state.selected.is_empty() {
+        return;
+    }
+    let reclaimable: HashSet<&PathBuf> = state
+        .scan
+        .items
+        .iter()
+        .filter(|item| item.may_reclaim())
+        .map(|item| &item.path)
+        .collect();
+    state.selected.retain(|path| reclaimable.contains(path));
+}
+
+/// Count and total on-disk bytes of the current selection, for the header tally
+/// and Confirm headline (issue #26). Only currently-Reclaimable selected Items
+/// count, matching the invariant held by [`prune_selection`].
+fn selection_totals(state: &AppState) -> (usize, u64) {
+    state
+        .scan
+        .items
+        .iter()
+        .filter(|item| item.may_reclaim() && state.selected.contains(&item.path))
+        .fold((0, 0), |(count, bytes), item| {
+            (count + 1, bytes + item.size_on_disk)
+        })
+}
+
+/// Per-Safety-Class breakdown of the selection in [`CLASS_ORDER`], used to render
+/// the Selection Confirm modal (issue #26): each entry is (class, count, bytes).
+fn selection_breakdown(state: &AppState) -> Vec<(SafetyClass, usize, u64)> {
+    CLASS_ORDER
+        .iter()
+        .filter_map(|&class| {
+            let mut count = 0usize;
+            let mut bytes = 0u64;
+            for item in state.scan.items.iter().filter(|item| {
+                item.class == class && item.may_reclaim() && state.selected.contains(&item.path)
+            }) {
+                count += 1;
+                bytes += item.size_on_disk;
+            }
+            (count > 0).then_some((class, count, bytes))
+        })
+        .collect()
+}
+
+/// Tri-state selection of a group's currently-Reclaimable Items, driving both the
+/// group checkbox glyph and what `Space` does on a group row (issue #26).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GroupSel {
+    /// Nothing in this group is Reclaimable (Protected, or an un-overridden
+    /// Unclassified group) — it cannot be selected at all.
+    Unavailable,
+    None,
+    Partial,
+    All,
+}
+
+fn group_selection(state: &AppState, class: SafetyClass) -> GroupSel {
+    let mut total = 0usize;
+    let mut selected = 0usize;
+    for item in state
+        .scan
+        .items
+        .iter()
+        .filter(|item| item.class == class && item.may_reclaim())
+    {
+        total += 1;
+        if state.selected.contains(&item.path) {
+            selected += 1;
+        }
+    }
+    match (total, selected) {
+        (0, _) => GroupSel::Unavailable,
+        (_, 0) => GroupSel::None,
+        (t, s) if s == t => GroupSel::All,
+        _ => GroupSel::Partial,
+    }
+}
+
+/// Paths of every currently-Reclaimable Item in a group, used to fill or clear the
+/// group's selection in one keystroke.
+fn group_reclaimable_paths(state: &AppState, class: SafetyClass) -> Vec<PathBuf> {
+    state
+        .scan
+        .items
+        .iter()
+        .filter(|item| item.class == class && item.may_reclaim())
+        .map(|item| item.path.clone())
+        .collect()
+}
+
+/// `Space`: toggle the highlighted row into or out of the selection. On an Item it
+/// ticks/unticks that one; on a group it fills to all Reclaimable Items, or clears
+/// when already fully selected (issue #26).
+fn toggle_selection(state: &mut AppState) {
+    match state.view {
+        View::Groups => toggle_group_selection(state),
+        View::Items { .. } => toggle_item_selection(state),
+    }
+}
+
+fn toggle_item_selection(state: &mut AppState) {
+    let Some(i) = selected_item_index(state) else {
+        return;
+    };
+    let item = &state.scan.items[i];
+    if !item.may_reclaim() {
+        // Selection and override are separate deliberate steps (issue #26): ticking
+        // an un-overridden Unclassified Item is a no-op that points at `o` first.
+        state.status = if item.class == SafetyClass::Unclassified {
+            format!(
+                "{} is Unclassified. Press o to override before selecting.",
+                item.path.display()
+            )
+        } else {
+            format!(
+                "{} is {}. Cannot be selected.",
+                item.path.display(),
+                item.class.label()
+            )
+        };
+        return;
+    }
+    let path = item.path.clone();
+    if !state.selected.remove(&path) {
+        state.selected.insert(path);
+    }
+    update_selection_status(state);
+}
+
+fn toggle_group_selection(state: &mut AppState) {
+    let Some(group) = selected_group_summary(state) else {
+        return;
+    };
+    let class = group.class;
+    match group_selection(state, class) {
+        GroupSel::Unavailable => {
+            state.status = match class {
+                SafetyClass::Unclassified => {
+                    "Unclassified has nothing reclaimable. Open it and press o to override Items."
+                        .into()
+                }
+                SafetyClass::Irreplaceable => {
+                    "Irreplaceable is Protected — cannot be selected.".into()
+                }
+                _ => format!("{} group has nothing reclaimable to select.", class.label()),
+            };
+            return;
+        }
+        // Fully selected → clear this group's Items.
+        GroupSel::All => {
+            for path in group_reclaimable_paths(state, class) {
+                state.selected.remove(&path);
+            }
+        }
+        // None or Partial → fill to all Reclaimable Items (a partial group fills to
+        // all first; it never silently discards individual picks).
+        GroupSel::None | GroupSel::Partial => {
+            for path in group_reclaimable_paths(state, class) {
+                state.selected.insert(path);
+            }
+        }
+    }
+    update_selection_status(state);
+}
+
+/// `a`: select every Reclaimable Item across the whole Scan, or clear the whole
+/// selection if everything Reclaimable is already selected (issue #26).
+fn toggle_select_all(state: &mut AppState) {
+    let all: Vec<PathBuf> = state
+        .scan
+        .items
+        .iter()
+        .filter(|item| item.may_reclaim())
+        .map(|item| item.path.clone())
+        .collect();
+    if all.is_empty() {
+        state.status = "Nothing reclaimable to select.".into();
+        return;
+    }
+    let all_selected = all.iter().all(|path| state.selected.contains(path));
+    if all_selected {
+        state.selected.clear();
+        state.status = "Selection cleared.".into();
+    } else {
+        state.selected = all.into_iter().collect();
+        update_selection_status(state);
+    }
+}
+
+fn update_selection_status(state: &mut AppState) {
+    let (count, bytes) = selection_totals(state);
+    state.status = if count == 0 {
+        "Selection cleared.".into()
+    } else {
+        format!(
+            "Selected {} {} · {} · press c to Reclaim the selection.",
+            count,
+            item_word(count),
+            human(bytes)
+        )
+    };
+}
+
 fn start_reclaim_job(state: &mut AppState, target: ConfirmTarget) {
     let (items, title, target_label) = match target {
         ConfirmTarget::Item { index } => {
@@ -592,6 +841,32 @@ fn start_reclaim_job(state: &mut AppState, target: ConfirmTarget) {
                 format!("Reclaiming {} group", class.label()),
                 format!("{} Items", class.label()),
             )
+        }
+        ConfirmTarget::Selection => {
+            let mut items: Vec<(usize, Item)> = state
+                .scan
+                .items
+                .iter()
+                .cloned()
+                .enumerate()
+                .filter(|(_, item)| item.may_reclaim() && state.selected.contains(&item.path))
+                .collect();
+
+            if items.is_empty() {
+                state.status = "Selection is empty. Nothing reclaimed.".into();
+                return;
+            }
+
+            // Process in CLASS_ORDER, then largest-first within a class — the same
+            // deterministic order the Confirm breakdown lists (issue #26). Stop
+            // -after-current stays intact because the worker is unchanged.
+            items.sort_by(|(_, a), (_, b)| {
+                class_rank(a.class)
+                    .cmp(&class_rank(b.class))
+                    .then(b.size_on_disk.cmp(&a.size_on_disk))
+            });
+
+            (items, "Reclaiming selection".into(), "Items".into())
         }
     };
 
@@ -850,16 +1125,31 @@ fn draw(f: &mut Frame, state: &AppState, tick: usize) {
     .areas(f.area());
 
     let total = human(state.scan.reclaimable_bytes());
-    f.render_widget(
-        Line::from(vec![
-            Span::raw(format!(" {}  ", state.scan.root.display())).bold(),
-            Span::styled(
-                format!("· reclaimable now: {total}"),
-                Style::default().fg(Color::Green),
+    let mut header_spans = vec![
+        Span::raw(format!(" {}  ", state.scan.root.display())).bold(),
+        Span::styled(
+            format!("· reclaimable now: {total}"),
+            Style::default().fg(Color::Green),
+        ),
+    ];
+    // Live selection tally next to "reclaimable now" (issue #26). The label carries
+    // the meaning so it stays legible in a monochrome terminal.
+    let (sel_count, sel_bytes) = selection_totals(state);
+    if sel_count > 0 {
+        header_spans.push(Span::raw("   "));
+        header_spans.push(Span::styled(
+            format!(
+                "Selected: {} {} · {}",
+                sel_count,
+                item_word(sel_count),
+                human(sel_bytes)
             ),
-        ]),
-        header,
-    );
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
+    f.render_widget(Line::from(header_spans), header);
 
     // Optional overview pane (issue #7): split the body so a proportional
     // on-disk-usage bar chart sits to the left of the action list. The list keeps
@@ -897,6 +1187,46 @@ fn draw(f: &mut Frame, state: &AppState, tick: usize) {
     }
 }
 
+/// The per-Item selection checkbox column (issue #26). Reclaimable Items show a
+/// monochrome-legible `[x]`/`[ ]`; non-Reclaimable Items (Protected, un-overridden
+/// Unclassified) keep the column blank so they never look selectable.
+fn item_checkbox(reclaimable: bool, selected: bool) -> Span<'static> {
+    if !reclaimable {
+        Span::raw("    ")
+    } else if selected {
+        Span::styled(
+            "[x] ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::raw("[ ] ")
+    }
+}
+
+/// The tri-state group checkbox column (issue #26): `[x]` all Reclaimable Items
+/// selected, `[~]` some, `[ ]` none, and blank when the group has nothing
+/// Reclaimable to select. The glyphs carry the meaning for monochrome terminals.
+fn group_checkbox(sel: GroupSel) -> Span<'static> {
+    match sel {
+        GroupSel::Unavailable => Span::raw("    "),
+        GroupSel::None => Span::raw("[ ] "),
+        GroupSel::Partial => Span::styled(
+            "[~] ",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        GroupSel::All => Span::styled(
+            "[x] ",
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
+    }
+}
+
 fn draw_group_list(f: &mut Frame, state: &AppState, area: Rect) {
     let rows: Vec<ListItem> = group_summaries(&state.scan)
         .into_iter()
@@ -926,6 +1256,7 @@ fn draw_group_list(f: &mut Frame, state: &AppState, area: Rect) {
             };
 
             ListItem::new(Line::from(vec![
+                group_checkbox(group_selection(state, group.class)),
                 Span::styled(
                     format!("{:<20}", group.class.label()),
                     Style::default()
@@ -964,6 +1295,7 @@ fn draw_item_list(f: &mut Frame, state: &AppState, class: SafetyClass, area: Rec
                 it.class.label().to_string()
             };
             ListItem::new(Line::from(vec![
+                item_checkbox(it.may_reclaim(), state.selected.contains(&it.path)),
                 Span::styled(
                     format!("{:>8}  ", human(it.size_on_disk)),
                     Style::default().bold(),
@@ -1142,7 +1474,91 @@ fn draw_confirm(f: &mut Frame, state: &AppState, target: ConfirmTarget) {
                 draw_group_confirm(f, group);
             }
         }
+        ConfirmTarget::Selection => draw_selection_confirm(f, state),
     }
+}
+
+/// Selection Confirm: the headline total, a per-Safety-Class breakdown (count,
+/// bytes, Recovery hint), then the same safety notes as the group modal. This is
+/// the only gate to a batch Reclaim across groups (CONTEXT.md → "Confirm").
+/// Protected and un-overridden Unclassified Items can never be in the selection,
+/// so they can never reach this modal.
+fn draw_selection_confirm(f: &mut Frame, state: &AppState) {
+    let breakdown = selection_breakdown(state);
+    let total_count: usize = breakdown.iter().map(|(_, count, _)| count).sum();
+    let total_bytes: u64 = breakdown.iter().map(|(_, _, bytes)| bytes).sum();
+    let has_unclassified = breakdown
+        .iter()
+        .any(|(class, _, _)| *class == SafetyClass::Unclassified);
+
+    let mut lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  Reclaim "),
+            Span::styled(human(total_bytes), Style::default().bold()),
+            Span::raw(format!(
+                " from {} selected {}",
+                total_count,
+                item_word(total_count)
+            )),
+        ]),
+        Line::from(""),
+    ];
+
+    for (class, count, bytes) in &breakdown {
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(
+                format!("{:<16}", class.label()),
+                Style::default()
+                    .fg(class_color(*class))
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:>3} {}  ", count, item_word(*count)),
+                Style::default().bold(),
+            ),
+            Span::styled(format!("{:>8}  ", human(*bytes)), Style::default().bold()),
+            Span::styled(
+                class_recovery_hint(*class),
+                Style::default().fg(Color::Gray),
+            ),
+        ]));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(
+        "  After Confirm, reclaim runs one Item at a time.",
+    ));
+    lines.push(Line::from(
+        "  You can stop before the next Item while it runs.",
+    ));
+    if has_unclassified {
+        lines.push(Line::from(
+            "  Only overridden Unclassified Items are included.",
+        ));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled("[y]", Style::default().fg(Color::Green).bold()),
+        Span::raw(" Reclaim selection    "),
+        Span::styled("[N]", Style::default().fg(Color::Red).bold()),
+        Span::raw(" cancel"),
+    ]));
+
+    let height = lines.len() as u16 + 2; // + top/bottom borders
+    let area = centered_rect(70, height, f.area());
+    f.render_widget(Clear, area);
+    f.render_widget(
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Confirm Selection Reclaim ")
+                .border_style(Style::default().fg(Color::Yellow)),
+        ),
+        area,
+    );
 }
 
 /// The deliberate Confirm prompt: quotes the Item's path, size, class, and how it
@@ -1864,5 +2280,263 @@ mod tests {
             override_reclaim: true,
         };
         assert!(unknown.recovery_line().contains("Trash"));
+    }
+
+    // -- Multi-select Reclaim (issue #26) ------------------------------------
+
+    /// `Space` on an Item inside a group ticks it into the selection and unticks
+    /// it again; the selection is keyed by path.
+    #[test]
+    fn space_toggles_item_selection() {
+        let nm = PathBuf::from("/tmp/node_modules");
+        let mut state = state_with(vec![node_modules_item(nm.clone())]);
+        handle_key(&mut state, KeyCode::Enter); // open Reinstallable group
+
+        handle_key(&mut state, KeyCode::Char(' '));
+        assert!(state.selected.contains(&nm), "Space selects the Item");
+        assert_eq!(selection_totals(&state), (1, 4096));
+
+        handle_key(&mut state, KeyCode::Char(' '));
+        assert!(!state.selected.contains(&nm), "Space again deselects it");
+        assert_eq!(selection_totals(&state), (0, 0));
+    }
+
+    /// `Space` on a group is tri-state: fill to all Reclaimable Items, then clear.
+    /// A partially-selected group fills to all first rather than discarding picks.
+    #[test]
+    fn space_on_group_fills_then_clears() {
+        let nm1 = PathBuf::from("/tmp/a/node_modules");
+        let nm2 = PathBuf::from("/tmp/b/node_modules");
+        let mut state = state_with(vec![
+            node_modules_item(nm1.clone()),
+            node_modules_item(nm2.clone()),
+        ]);
+        select_group(&mut state, SafetyClass::Reinstallable);
+
+        // Start partial: tick just one Item via the Items view.
+        handle_key(&mut state, KeyCode::Enter);
+        handle_key(&mut state, KeyCode::Char(' '));
+        assert_eq!(state.selected.len(), 1);
+        handle_key(&mut state, KeyCode::Esc); // back to Groups
+        assert_eq!(
+            group_selection(&state, SafetyClass::Reinstallable),
+            GroupSel::Partial
+        );
+
+        // Space on the partial group fills to all, never discarding the pick.
+        handle_key(&mut state, KeyCode::Char(' '));
+        assert!(state.selected.contains(&nm1) && state.selected.contains(&nm2));
+        assert_eq!(
+            group_selection(&state, SafetyClass::Reinstallable),
+            GroupSel::All
+        );
+
+        // Space again on the full group clears it.
+        handle_key(&mut state, KeyCode::Char(' '));
+        assert!(state.selected.is_empty());
+        assert_eq!(
+            group_selection(&state, SafetyClass::Reinstallable),
+            GroupSel::None
+        );
+    }
+
+    /// `a` selects every Reclaimable Item across the Scan, then clears on a second
+    /// press. Protected Items are never swept in.
+    #[test]
+    fn select_all_toggles_and_excludes_protected() {
+        let nm = PathBuf::from("/tmp/node_modules");
+        let cache = PathBuf::from("/tmp/.npm");
+        let vm = PathBuf::from("/tmp/disk.img.raw");
+        let mut state = state_with(vec![
+            node_modules_item(nm.clone()),
+            cache_item(cache.clone(), 1024),
+            protected_item(vm.clone(), 64 * 1024),
+        ]);
+
+        handle_key(&mut state, KeyCode::Char('a'));
+        assert!(state.selected.contains(&nm));
+        assert!(state.selected.contains(&cache));
+        assert!(
+            !state.selected.contains(&vm),
+            "Protected Item is never selected"
+        );
+        assert_eq!(state.selected.len(), 2);
+
+        handle_key(&mut state, KeyCode::Char('a'));
+        assert!(
+            state.selected.is_empty(),
+            "a again clears the whole selection"
+        );
+    }
+
+    /// `Space` on an un-overridden Unclassified Item is a no-op that points at `o`,
+    /// and a Protected Item can never be selected (acceptance: invariant + guard).
+    #[test]
+    fn space_is_noop_on_non_reclaimable() {
+        let mystery = PathBuf::from("/tmp/mystery");
+        let mut state = state_with(vec![unclassified_item(mystery.clone(), false)]);
+        handle_key(&mut state, KeyCode::Enter); // open Unclassified group
+        handle_key(&mut state, KeyCode::Char(' '));
+        assert!(state.selected.is_empty());
+        assert!(state.status.contains("Press o to override"));
+
+        let vm = PathBuf::from("/tmp/disk.img.raw");
+        let mut state = state_with(vec![protected_item(vm.clone(), 4096)]);
+        handle_key(&mut state, KeyCode::Char(' ')); // on the Protected group
+        assert!(state.selected.is_empty());
+        assert!(matches!(state.mode, Mode::Browse));
+    }
+
+    /// Clearing an Unclassified override auto-deselects that Item, holding the
+    /// invariant that the selection is a subset of Reclaimable Items.
+    #[test]
+    fn clearing_override_deselects_item() {
+        let mystery = PathBuf::from("/tmp/mystery");
+        let mut state = state_with(vec![unclassified_item(mystery.clone(), false)]);
+        handle_key(&mut state, KeyCode::Enter);
+        handle_key(&mut state, KeyCode::Char('o')); // override → Reclaimable
+        handle_key(&mut state, KeyCode::Char(' ')); // now selectable
+        assert!(state.selected.contains(&mystery));
+
+        handle_key(&mut state, KeyCode::Char('o')); // clear override
+        assert!(
+            !state.selected.contains(&mystery),
+            "clearing the override drops it from the selection"
+        );
+    }
+
+    /// `c` with an empty selection is unchanged: it still opens the whole-group
+    /// Confirm in Groups view (the existing fallback path).
+    #[test]
+    fn empty_selection_c_falls_back_to_group_confirm() {
+        let mut state = state_with(vec![node_modules_item(PathBuf::from("/tmp/node_modules"))]);
+        handle_key(&mut state, KeyCode::Char('c'));
+        assert!(matches!(
+            state.mode,
+            Mode::Confirm {
+                target: ConfirmTarget::Group {
+                    class: SafetyClass::Reinstallable
+                }
+            }
+        ));
+    }
+
+    /// `c` with a non-empty selection opens the Selection Confirm and Reclaims the
+    /// whole set only on `y` — nothing is deleted before `y`. Survivors of the
+    /// reclaim (here: all succeed) leave the selection.
+    #[test]
+    fn selection_confirm_reclaims_whole_set_only_on_y() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nm = tmp.path().join("node_modules");
+        let cache = tmp.path().join(".npm");
+        fs::create_dir(&nm).unwrap();
+        fs::create_dir(&cache).unwrap();
+        fs::write(nm.join("index.js"), b"x").unwrap();
+        fs::write(cache.join("blob"), b"x").unwrap();
+
+        let mut state = state_with(vec![
+            node_modules_item(nm.clone()),
+            cache_item(cache.clone(), 1024),
+        ]);
+        handle_key(&mut state, KeyCode::Char('a')); // select all Reclaimable
+        handle_key(&mut state, KeyCode::Char('c'));
+
+        assert!(matches!(
+            state.mode,
+            Mode::Confirm {
+                target: ConfirmTarget::Selection
+            }
+        ));
+        assert!(nm.exists() && cache.exists(), "nothing deleted before y");
+
+        handle_key(&mut state, KeyCode::Char('y'));
+        assert!(matches!(state.mode, Mode::Reclaiming));
+        wait_for_reclaim(&mut state);
+
+        assert!(!nm.exists(), "selection Reclaim removes the Item");
+        assert!(!cache.exists(), "across groups in one Confirm");
+        assert!(state.scan.items.is_empty());
+        assert!(
+            state.selected.is_empty(),
+            "Reclaimed Items leave the selection"
+        );
+    }
+
+    /// Cancelling the Selection Confirm with any non-`y` key deletes nothing and
+    /// keeps the selection intact so the user can retry.
+    #[test]
+    fn selection_confirm_cancel_keeps_selection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nm = tmp.path().join("node_modules");
+        fs::create_dir(&nm).unwrap();
+
+        let mut state = state_with(vec![node_modules_item(nm.clone())]);
+        handle_key(&mut state, KeyCode::Char('a'));
+        handle_key(&mut state, KeyCode::Char('c'));
+        handle_key(&mut state, KeyCode::Char('n'));
+
+        assert!(matches!(state.mode, Mode::Browse));
+        assert!(nm.exists(), "cancel deletes nothing");
+        assert!(
+            state.selected.contains(&nm),
+            "cancel keeps the selection for a retry"
+        );
+    }
+
+    /// After a stop, the untouched Item stays in the selection so `c` resumes
+    /// immediately; the Reclaimed one drops out (acceptance: survivors stay).
+    #[test]
+    fn stopped_selection_keeps_untouched_item_selected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = tmp.path().join("one").join("buildcache");
+        let second = tmp.path().join("two").join("buildcache");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+
+        let mut state = state_with(vec![
+            slow_regenerable_item(first.clone()),
+            slow_regenerable_item(second.clone()),
+        ]);
+        state.ruleset = slow_ruleset();
+
+        handle_key(&mut state, KeyCode::Char('a')); // select both
+        assert_eq!(state.selected.len(), 2);
+        handle_key(&mut state, KeyCode::Char('c'));
+        handle_key(&mut state, KeyCode::Char('y'));
+        wait_until_reclaim_current_ordinal(&mut state, 1);
+        handle_key(&mut state, KeyCode::Char('s')); // stop after current
+        wait_for_reclaim(&mut state);
+
+        assert_eq!(state.scan.items.len(), 1, "one Item was untouched");
+        assert_eq!(
+            state.selected.len(),
+            1,
+            "the untouched Item stays selected for a resume"
+        );
+        let survivor = &state.scan.items[0].path;
+        assert!(state.selected.contains(survivor));
+    }
+
+    /// The per-class Confirm breakdown follows CLASS_ORDER and only lists selected
+    /// Reclaimable Items, with correct counts and bytes.
+    #[test]
+    fn selection_breakdown_follows_class_order() {
+        let mut state = state_with(vec![
+            cache_item(PathBuf::from("/tmp/.npm"), 2048),
+            cache_item(PathBuf::from("/tmp/.cache"), 1024),
+            node_modules_item(PathBuf::from("/tmp/node_modules")),
+            protected_item(PathBuf::from("/tmp/vm.img.raw"), 9999),
+        ]);
+        handle_key(&mut state, KeyCode::Char('a'));
+
+        let breakdown = selection_breakdown(&state);
+        assert_eq!(
+            breakdown,
+            vec![
+                (SafetyClass::Reinstallable, 1, 4096),
+                (SafetyClass::Cache, 2, 3072),
+            ],
+            "Reinstallable precedes Cache (CLASS_ORDER); Protected is absent"
+        );
     }
 }
