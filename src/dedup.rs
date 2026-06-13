@@ -5,9 +5,11 @@
 //! produces it — duplication is a relationship *between* Items, not a property of
 //! one — so this runs as a second pass over a finished [`Scan`].
 //!
-//! Cost control (per issue scope): on-disk size is the cheap pre-filter — only
-//! Items of exactly equal size can be byte-identical — and `blake3` confirms
-//! equality, so we never hash an Item that has no size-peer.
+//! Cost control: only non-Reclaimable Items are checked, because duplicate
+//! evidence changes behavior for Unclassified and Protected data; Items already
+//! Reclaimable do not need an expensive content proof to be offered. Within that
+//! set, on-disk size is the cheap pre-filter — only Items of exactly equal size
+//! can be byte-identical — and `blake3` confirms equality.
 
 use crate::model::{Evidence, Item, RecoveryMethod, SafetyClass, Scan};
 use jwalk::WalkDir;
@@ -21,11 +23,14 @@ use std::path::Path;
 /// class — including `Irreplaceable`, so a Protected original is never the Item
 /// we offer to delete.
 pub fn analyze(scan: &mut Scan) {
-    // Cheap pre-filter: bucket Items by on-disk size; only same-size Items can be
-    // byte-identical, so anything alone in its bucket is never hashed.
+    // Cheap pre-filter: bucket non-Reclaimable Items by on-disk size; only
+    // same-size Items can be byte-identical, so anything alone in its bucket is
+    // never hashed. Already-Reclaimable Items are skipped because relabeling them
+    // as Redundant Copy does not make an unsafe Item safe, and hashing large
+    // dependency/cache trees dominates Scan time.
     let mut by_size: HashMap<u64, Vec<usize>> = HashMap::new();
     for (i, item) in scan.items.iter().enumerate() {
-        if item.size_on_disk == 0 {
+        if item.size_on_disk == 0 || item.class.is_reclaimable() {
             continue; // empty Items would all collide; nothing to reclaim anyway.
         }
         by_size.entry(item.size_on_disk).or_default().push(i);
@@ -72,7 +77,9 @@ fn mark_redundant(items: &mut [Item], group: &mut [usize]) {
     for &dup in &group[1..] {
         let item = &mut items[dup];
         item.class = SafetyClass::RedundantCopy;
-        item.recovery = RecoveryMethod::SurvivingCopy { original: original.clone() };
+        item.recovery = RecoveryMethod::SurvivingCopy {
+            original: original.clone(),
+        };
         item.evidence = Evidence {
             summary: format!("byte-identical to {}", original.display()),
         };
@@ -164,7 +171,9 @@ mod tests {
         assert!(copy.may_reclaim());
         assert_eq!(
             copy.recovery,
-            RecoveryMethod::SurvivingCopy { original: original.path.clone() }
+            RecoveryMethod::SurvivingCopy {
+                original: original.path.clone()
+            }
         );
         assert!(copy.evidence.summary.contains("byte-identical to"));
         // The original is left alone — still just an Unclassified unknown.
@@ -217,6 +226,40 @@ mod tests {
         }
         assert!(!copy_path.exists());
         assert!(survivor.path.exists());
-        assert!(freed > 0, "on-disk size should be measured (was {})", scan::human(freed));
+        assert!(
+            freed > 0,
+            "on-disk size should be measured (was {})",
+            scan::human(freed)
+        );
+    }
+
+    /// Issue #19 performance guardrail: Redundant Copy detection should not hash
+    /// Items that are already Reclaimable. Relabeling Reinstallable dependency
+    /// trees would not change whether they can be Reclaimed, but hashing many of
+    /// them dominates large cache scans.
+    #[test]
+    fn already_reclaimable_duplicates_stay_in_their_original_class() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        for dir in ["a/node_modules", "b/node_modules"] {
+            let d = root.join(dir);
+            fs::create_dir_all(&d).unwrap();
+            fs::write(d.join("package.js"), vec![1u8; 8192]).unwrap();
+        }
+
+        let mut s = classify::run(root, &Ruleset::defaults(), 1);
+        analyze(&mut s);
+
+        let copies: Vec<&Item> = s
+            .items
+            .iter()
+            .filter(|item| item.path.file_name().and_then(|n| n.to_str()) == Some("node_modules"))
+            .collect();
+
+        assert_eq!(copies.len(), 2);
+        assert!(copies
+            .iter()
+            .all(|item| item.class == SafetyClass::Reinstallable && item.may_reclaim()));
     }
 }
