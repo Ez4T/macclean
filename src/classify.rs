@@ -1,12 +1,31 @@
 //! Applies the [`Ruleset`] to a directory tree to produce a [`Scan`] of
 //! classified [`Item`]s. Anything large that no Rule matches becomes
 //! `Unclassified` rather than being guessed at (the fail-safe of ADR-0001).
+//!
+//! The tree is walked exactly once, in parallel: jwalk's worker threads run
+//! every syscall (each entry's `lstat` for its on-disk size, plus the
+//! filesystem probes some Rules need, like the `PG_VERSION` marker) inside
+//! `process_read_dir`, storing the results on each entry. The consumer then
+//! folds jwalk's strict depth-first stream with a small depth-indexed stack and
+//! no further syscalls — so the cost is one parallel stat per file, which is the
+//! floor ADR-0006 imposes, rather than a serial stat plus a re-walk per match.
 
 use crate::model::{Evidence, Item, RecoveryMethod, SafetyClass, Scan};
 use crate::ruleset::{Match, Rule, Ruleset};
-use crate::scan::on_disk_size;
-use jwalk::WalkDir;
-use std::path::Path;
+use crate::scan::entry_on_disk_bytes;
+use jwalk::rayon::prelude::*;
+use jwalk::WalkDirGeneric;
+use std::path::{Path, PathBuf};
+
+/// Per-entry facts computed in parallel on jwalk's worker threads: the entry's
+/// own on-disk bytes (allocated blocks, ADR-0006) and the index of the first
+/// Rule it matches, if any. Carried on each [`jwalk::DirEntry`] so the consumer
+/// fold needs no Ruleset borrow and no syscalls.
+type EntryFacts = (u64, Option<usize>);
+
+/// The walk specialized to carry [`EntryFacts`] per entry (no per-directory
+/// state is needed, so the read-dir state is `()`).
+type ClassifyWalk = WalkDirGeneric<((), EntryFacts)>;
 
 /// First Rule whose [`Match`] applies to `path`, in Ruleset order (user rules
 /// first — see [`Ruleset::with_user_rules`]). Determines `is_dir` itself with a
@@ -18,10 +37,17 @@ pub fn match_rule<'a>(ruleset: &'a Ruleset, path: &Path) -> Option<&'a Rule> {
 /// Like [`match_rule`] but with the file-type already known, avoiding an extra
 /// stat per Item during a Scan.
 pub fn match_rule_typed<'a>(ruleset: &'a Ruleset, path: &Path, is_dir: bool) -> Option<&'a Rule> {
+    match_rule_index(ruleset, path, is_dir).map(|i| &ruleset.rules[i])
+}
+
+/// Index of the first matching Rule — the form the parallel walk stores on each
+/// entry, since a `usize` can ride along in [`EntryFacts`] where a `&Rule`
+/// borrow could not.
+fn match_rule_index(ruleset: &Ruleset, path: &Path, is_dir: bool) -> Option<usize> {
     ruleset
         .rules
         .iter()
-        .find(|rule| matches_path(&rule.matches, path, is_dir))
+        .position(|rule| matches_path(&rule.matches, path, is_dir))
 }
 
 fn matches_path(m: &Match, path: &Path, is_dir: bool) -> bool {
@@ -102,110 +128,201 @@ fn recovery_for(rule: &Rule) -> RecoveryMethod {
 /// Walk `root`, classify directories against `ruleset`, and surface anything
 /// large-but-unmatched as `Unclassified`. `min_unclassified` is the on-disk
 /// threshold below which unmatched dirs are ignored (kept out of the way).
+///
+/// One parallel pass: workers stat and match every entry (see [`EntryFacts`]),
+/// and the [`DirFrame`] fold turns the depth-first stream into Items without a
+/// second syscall — matched directories own their whole subtree (nested matches
+/// pruned), and the largest match-free subtrees surface as `Unclassified`.
 pub fn run(root: &Path, ruleset: &Ruleset, min_unclassified: u64) -> Scan {
-    let mut items: Vec<Item> = Vec::new();
-    let mut matched_prefixes: Vec<std::path::PathBuf> = Vec::new();
-
-    // Pass 1: find every matched Item, pruning anything inside one already
-    // matched (a matched Item is reclaimed — or protected — as one unit). Both
-    // directories (e.g. `target/`) and files (e.g. a `*.img.raw` VM image) can
-    // match, so we consider every entry rather than directories alone.
-    for entry in WalkDir::new(root)
+    // The workers need their own copy of the Ruleset (the closure is `Send +
+    // Sync` and outlives this frame); the consumer keeps using the borrow.
+    let walk_ruleset = ruleset.clone();
+    let walk = ClassifyWalk::new(root)
         .skip_hidden(false)
-        .into_iter()
-        .filter_map(Result::ok)
-    {
-        let path = entry.path();
-        let is_dir = entry.file_type().is_dir();
-        // Skip anything already inside a matched Item.
-        if matched_prefixes.iter().any(|p| path.starts_with(p)) {
-            continue;
-        }
-        if let Some(rule) = match_rule_typed(ruleset, &path, is_dir) {
-            items.push(Item {
-                size_on_disk: on_disk_size(&path),
-                class: rule.class,
-                recovery: recovery_for(rule),
-                evidence: Evidence { summary: rule.evidence.clone() },
-                override_reclaim: false,
-                path: path.clone(),
+        .process_read_dir(move |_depth, _path, _read_dir_state, children| {
+            // Runs on jwalk's rayon workers: do every syscall here so the
+            // consumer stays pure CPU. Each child gets one `lstat` for its
+            // on-disk size and its Rule match (which may itself stat, e.g. the
+            // `PG_VERSION` / sibling-marker probes) — both then fold in for free.
+            //
+            // jwalk parallelizes *across* directories, but a single directory
+            // with tens of thousands of flat entries (a packed cache) would stat
+            // them serially on one worker and dominate the wall clock. Fan the
+            // per-child stats out across the same rayon pool so a wide directory
+            // is no longer a serial bottleneck.
+            children.par_iter_mut().for_each(|child_result| {
+                if let Ok(child) = child_result {
+                    let path = child.path();
+                    let is_dir = child.file_type().is_dir();
+                    let bytes = child.metadata().map(|m| entry_on_disk_bytes(&m)).unwrap_or(0);
+                    let rule_idx = match_rule_index(&walk_ruleset, &path, is_dir);
+                    child.client_state = (bytes, rule_idx);
+                }
             });
-            matched_prefixes.push(path);
+        });
+
+    let mut items: Vec<Item> = Vec::new();
+    let mut stack: Vec<DirFrame> = Vec::new();
+
+    for entry in walk.into_iter().flatten() {
+        let depth = entry.depth;
+        let (bytes, rule_idx) = entry.client_state;
+        let is_dir = entry.file_type().is_dir();
+
+        // Strict depth-first order means every open frame at this depth or deeper
+        // is now complete: pop and settle them (deepest first) before the entry.
+        while stack.last().map(|f| f.depth >= depth).unwrap_or(false) {
+            let frame = stack.pop().unwrap();
+            finish_frame(frame, &mut stack, &mut items, ruleset, min_unclassified);
+        }
+
+        // After popping, the stack top is this entry's parent directory. Once an
+        // ancestor has matched, everything below belongs to that Item.
+        let covered = stack
+            .last()
+            .map(|f| f.owned || f.rule_idx.is_some())
+            .unwrap_or(false);
+
+        if is_dir {
+            stack.push(DirFrame {
+                path: entry.path(),
+                depth,
+                bytes,
+                rule_idx,
+                owned: covered,
+                has_match_below: rule_idx.is_some(),
+                clean_children: Vec::new(),
+            });
+        } else {
+            // A leaf folds its bytes into the open directory. A matched leaf that
+            // isn't already inside an Item (e.g. a top-level `*.img.raw` image)
+            // becomes an Item itself and marks its ancestors as holding a match.
+            if let Some(top) = stack.last_mut() {
+                top.bytes += bytes;
+            }
+            if let Some(ri) = rule_idx {
+                if !covered {
+                    items.push(make_item(entry.path(), bytes, &ruleset.rules[ri]));
+                    mark_match_below(&mut stack);
+                }
+            }
         }
     }
 
-    // Pass 2: surface the largest unmatched subtrees as Unclassified, recursing
-    // past any directory that holds a matched Item so a deeply nested unknown is
-    // still found even when its ancestors contain matched data (ADR-0001
-    // fail-safe). Root's own matched children are skipped — they are already
-    // Items.
-    if let Ok(read) = std::fs::read_dir(root) {
-        for child in read.filter_map(Result::ok) {
-            let cpath = child.path();
-            if !cpath.is_dir() {
-                continue;
-            }
-            if matched_prefixes.iter().any(|p| p == &cpath) {
-                continue;
-            }
-            surface_unclassified(&cpath, &matched_prefixes, min_unclassified, &mut items);
-        }
+    // Drain the directories still open at end of stream, root last. Root is the
+    // scan scope, never an Item, and always a descend point — so its match-free
+    // children surface as the top-level unknowns (ADR-0001).
+    while let Some(frame) = stack.pop() {
+        finish_frame(frame, &mut stack, &mut items, ruleset, min_unclassified);
     }
 
     items.sort_by(|a, b| b.size_on_disk.cmp(&a.size_on_disk));
     Scan { root: root.to_path_buf(), items }
 }
 
-/// Recursively surface the largest unmatched subtrees at or below `dir` as
-/// `Unclassified` Items (ADR-0001). `dir` is always an unmatched directory.
-///
-/// - If `dir` contains *no* matched Item, the whole subtree is unknown, so it is
-///   surfaced as a single Unclassified Item when it meets `min_unclassified` and
-///   not descended into — this is what keeps nested unknowns from being double
-///   counted against their parent.
-/// - If `dir` *does* contain a matched Item, it can't be surfaced whole (the
-///   matched parts aren't Unclassified), so we descend into its child
-///   directories — skipping matched Items, which are pruned as their own units —
-///   to surface the unmatched subtrees nested within.
-fn surface_unclassified(
-    dir: &Path,
-    matched_prefixes: &[std::path::PathBuf],
-    min_unclassified: u64,
-    items: &mut Vec<Item>,
-) {
-    let has_matched_descendant = matched_prefixes
-        .iter()
-        .any(|p| p.starts_with(dir) && p != dir);
+/// One open directory in the depth-first fold. jwalk yields entries in strict
+/// depth-first order, so at most one frame per live depth sits on the stack; a
+/// frame settles (is popped) the instant an entry at its depth or shallower
+/// arrives, or when the stream ends.
+struct DirFrame {
+    path: PathBuf,
+    depth: usize,
+    /// Running on-disk total for this subtree: own blocks plus every descendant
+    /// streamed so far. A completed child folds its total in when it pops.
+    bytes: u64,
+    /// First Rule this directory itself matched — it then owns its whole subtree
+    /// as a single Item.
+    rule_idx: Option<usize>,
+    /// True when an ancestor already matched: this directory is part of that
+    /// Item and is never emitted on its own (matched-item pruning).
+    owned: bool,
+    /// True once anything at or below here matched a Rule. Such a directory
+    /// can't be surfaced whole — its match-free children are surfaced instead
+    /// (issue #3), so a deeply nested unknown is still found.
+    has_match_below: bool,
+    /// Match-free child subtrees held as `Unclassified` candidates. They surface
+    /// only if this directory turns out to contain a match (a descend point);
+    /// otherwise the whole directory is one candidate and these are subsumed.
+    clean_children: Vec<(PathBuf, u64)>,
+}
 
-    if !has_matched_descendant {
-        let size = on_disk_size(dir);
-        if size >= min_unclassified {
-            items.push(Item {
-                size_on_disk: size,
-                class: SafetyClass::Unclassified,
-                recovery: RecoveryMethod::None,
-                evidence: Evidence {
-                    summary: "Large, but no Rule matched — inspect before deleting.".into(),
-                },
-                override_reclaim: false,
-                path: dir.to_path_buf(),
-            });
+/// Settle a popped directory: fold its bytes into its parent and decide what it
+/// contributes — a matched Item, a set of surfaced `Unclassified` children, or a
+/// single clean candidate handed up to its parent.
+fn finish_frame(
+    frame: DirFrame,
+    stack: &mut Vec<DirFrame>,
+    items: &mut Vec<Item>,
+    ruleset: &Ruleset,
+    min_unclassified: u64,
+) {
+    // `stack` now holds the ancestors; empty means this frame is the root.
+    let is_root = stack.is_empty();
+    if let Some(parent) = stack.last_mut() {
+        parent.bytes += frame.bytes;
+        if frame.has_match_below {
+            parent.has_match_below = true;
+        }
+    }
+
+    if let Some(ri) = frame.rule_idx {
+        // A matched directory owns its subtree; only the outermost match becomes
+        // an Item (nested ones are pruned), and its children are part of it.
+        if !frame.owned && !is_root {
+            items.push(make_item(frame.path, frame.bytes, &ruleset.rules[ri]));
         }
         return;
     }
 
-    if let Ok(read) = std::fs::read_dir(dir) {
-        for child in read.filter_map(Result::ok) {
-            let cpath = child.path();
-            if !cpath.is_dir() {
-                continue;
+    if frame.owned {
+        // Inside a matched Item: not surfaced; its bytes already folded upward.
+        return;
+    }
+
+    if is_root || frame.has_match_below {
+        // A descend point: surface the match-free child subtrees that clear the
+        // threshold as the unknowns nested beside matched data.
+        for (path, bytes) in frame.clean_children {
+            if bytes >= min_unclassified {
+                items.push(unclassified_item(path, bytes));
             }
-            // A matched Item is its own unit — never folded into an Unclassified.
-            if matched_prefixes.iter().any(|p| p == &cpath) {
-                continue;
-            }
-            surface_unclassified(&cpath, matched_prefixes, min_unclassified, items);
         }
+    } else if let Some(parent) = stack.last_mut() {
+        // Wholly match-free: hand the whole directory up as one candidate,
+        // subsuming its own children so nested unknowns aren't double-counted.
+        parent.clean_children.push((frame.path, frame.bytes));
+    }
+}
+
+/// Mark every open directory as containing a match — used when a matched leaf is
+/// emitted, since the live stack is exactly that leaf's chain of ancestors.
+fn mark_match_below(stack: &mut [DirFrame]) {
+    for frame in stack.iter_mut() {
+        frame.has_match_below = true;
+    }
+}
+
+fn make_item(path: PathBuf, size_on_disk: u64, rule: &Rule) -> Item {
+    Item {
+        size_on_disk,
+        class: rule.class,
+        recovery: recovery_for(rule),
+        evidence: Evidence { summary: rule.evidence.clone() },
+        override_reclaim: false,
+        path,
+    }
+}
+
+fn unclassified_item(path: PathBuf, size_on_disk: u64) -> Item {
+    Item {
+        size_on_disk,
+        class: SafetyClass::Unclassified,
+        recovery: RecoveryMethod::None,
+        evidence: Evidence {
+            summary: "Large, but no Rule matched — inspect before deleting.".into(),
+        },
+        override_reclaim: false,
+        path,
     }
 }
 
@@ -441,5 +558,33 @@ mod tests {
             Some("bigdata"),
         );
         assert!(!unclassified[0].may_reclaim());
+    }
+
+    /// A matched Item owns its whole subtree. A nested directory that would
+    /// otherwise match another Rule must not be surfaced separately or counted
+    /// twice.
+    #[test]
+    fn matched_item_prunes_nested_matches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        let proj = root.join("proj");
+        let target = proj.join("target");
+        let nested_node_modules = target.join("node_modules");
+        fs::create_dir_all(&nested_node_modules).unwrap();
+        fs::write(proj.join("Cargo.toml"), b"[package]\n").unwrap();
+        fs::write(target.join("build-output"), vec![0u8; 64 * 1024]).unwrap();
+        fs::write(nested_node_modules.join("index.js"), vec![0u8; 64 * 1024]).unwrap();
+
+        let scan = run(root, &Ruleset::defaults(), 1);
+
+        let target_item = item_for(&scan, "target");
+        assert_eq!(target_item.class, SafetyClass::Regenerable);
+        assert!(
+            scan.items
+                .iter()
+                .all(|i| i.path.file_name().and_then(|n| n.to_str()) != Some("node_modules")),
+            "nested matches under an Item should be pruned"
+        );
     }
 }

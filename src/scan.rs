@@ -2,28 +2,18 @@
 //! apparent file length (ADR-0006), so sparse images and clones are not
 //! overstated.
 
-use jwalk::WalkDir;
 use std::os::unix::fs::MetadataExt;
-use std::path::Path;
 
 /// Actual on-disk bytes for a single path's own metadata: allocated 512-byte
 /// blocks (ADR-0006), not `len()`.
+///
+/// Whole-subtree totals are no longer summed here: [`crate::classify`] walks the
+/// tree once in parallel and folds these per-entry blocks itself, so a separate
+/// recursive re-walk per matched directory is gone.
 pub fn entry_on_disk_bytes(meta: &std::fs::Metadata) -> u64 {
     // `blocks()` counts 512-byte units actually allocated; sparse holes and
     // unwritten regions are excluded.
     meta.blocks() * 512
-}
-
-/// Recursively sum actual on-disk bytes under `path` (the path itself plus all
-/// descendants), walked in parallel.
-pub fn on_disk_size(path: &Path) -> u64 {
-    WalkDir::new(path)
-        .skip_hidden(false)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter_map(|e| e.metadata().ok())
-        .map(|m| entry_on_disk_bytes(&m))
-        .sum()
 }
 
 /// Human-friendly size, matching the `du -h` style used throughout the project.
