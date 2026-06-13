@@ -415,6 +415,26 @@ const WORDMARK_FIGLET: [&str; 3] = [
 ];
 const WORDMARK_PLAIN: &str = "macclean";
 
+/// The running build's version tag (issue #30), e.g. `v0.1.0`. Sourced from the
+/// package version at compile time so it is never hard-coded and never drifts.
+const VERSION_TAG: &str = concat!("v", env!("CARGO_PKG_VERSION"));
+
+/// Append [`VERSION_TAG`] right-aligned within a one-line header `width`, dimmed
+/// so it stays unobtrusive (issue #30). It is only added when it fits after the
+/// existing spans plus a one-column gap, so at narrow widths it is dropped rather
+/// than pushing other header content off-screen.
+fn push_version_tag(spans: &mut Vec<Span<'static>>, width: usize) {
+    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let tag = VERSION_TAG.chars().count();
+    // Need room for the existing content, the tag, and at least one space of gap.
+    if width < used + tag + 1 {
+        return;
+    }
+    let pad = width - used - tag;
+    spans.push(Span::raw(" ".repeat(pad)));
+    spans.push(Span::styled(VERSION_TAG, Style::default().fg(Color::DarkGray)));
+}
+
 /// Static sitting cat tucked to the left of the spinner so the during-scan
 /// screen reads as "the cat is scanning". No animation — the spinner is the
 /// single source of motion (issue #28). [`CAT_COMPACT`] is the height fallback.
@@ -616,6 +636,17 @@ fn loading_body_lines(w: usize, h: usize, spinner: &str, seconds: u64) -> Vec<Li
     vec![spinner_status_line(spinner, seconds)]
 }
 
+/// The during-scan header row: the root being scanned, the live status, and the
+/// right-aligned version tag (issue #30). The tag is dropped at narrow `width`.
+fn loading_header(root: &Path, width: usize) -> Line<'static> {
+    let mut spans = vec![
+        Span::raw(format!(" {}  ", root.display())).bold(),
+        Span::styled("· scanning filesystem", Style::default().fg(Color::Yellow)),
+    ];
+    push_version_tag(&mut spans, width);
+    Line::from(spans)
+}
+
 fn draw_loading(f: &mut Frame, root: &Path, elapsed: Duration, tick: usize) {
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(1),
@@ -626,13 +657,7 @@ fn draw_loading(f: &mut Frame, root: &Path, elapsed: Duration, tick: usize) {
     let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     let spinner = frames[tick % frames.len()];
 
-    f.render_widget(
-        Line::from(vec![
-            Span::raw(format!(" {}  ", root.display())).bold(),
-            Span::styled("· scanning filesystem", Style::default().fg(Color::Yellow)),
-        ]),
-        header,
-    );
+    f.render_widget(loading_header(root, header.width as usize), header);
 
     let scan_block = Block::default().borders(Borders::ALL).title(" Scan ");
     let inner = scan_block.inner(body);
@@ -1334,15 +1359,10 @@ fn do_reclaim_item(state: &mut AppState, i: usize) {
     }
 }
 
-fn draw(f: &mut Frame, state: &AppState, tick: usize) {
-    let [header, body, detail, footer] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Min(1),
-        Constraint::Length(1),
-        Constraint::Length(3),
-    ])
-    .areas(f.area());
-
+/// The results-view header row: the scanned root, the live reclaimable total, the
+/// optional selection tally (issue #26), and the right-aligned version tag (issue
+/// #30). The tag is dropped at narrow `width` so it never crowds the tally.
+fn main_header(state: &AppState, width: usize) -> Line<'static> {
     let total = human(state.scan.reclaimable_bytes());
     let mut header_spans = vec![
         Span::raw(format!(" {}  ", state.scan.root.display())).bold(),
@@ -1368,7 +1388,20 @@ fn draw(f: &mut Frame, state: &AppState, tick: usize) {
                 .add_modifier(Modifier::BOLD),
         ));
     }
-    f.render_widget(Line::from(header_spans), header);
+    push_version_tag(&mut header_spans, width);
+    Line::from(header_spans)
+}
+
+fn draw(f: &mut Frame, state: &AppState, tick: usize) {
+    let [header, body, detail, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(3),
+    ])
+    .areas(f.area());
+
+    f.render_widget(main_header(state, header.width as usize), header);
 
     // Optional overview pane (issue #7): split the body so a proportional
     // on-disk-usage bar chart sits to the left of the action list. The list keeps
@@ -2848,5 +2881,33 @@ mod tests {
         let minimal = loading_body_lines(80, 2, "⠙", 7);
         assert_eq!(minimal.len(), 1, "minimal tier is a single line");
         assert!(!flatten(&minimal).contains("(_______)"), "no cat at h=2");
+    }
+
+    /// The version tag (sourced from CARGO_PKG_VERSION, never hard-coded) is shown
+    /// on both the during-scan/welcome header and the results-view header (issue #30).
+    #[test]
+    fn version_tag_present_on_welcome_and_main_headers() {
+        let tag = concat!("v", env!("CARGO_PKG_VERSION"));
+        let root = PathBuf::from("/tmp");
+
+        let welcome = flatten(&[loading_header(&root, 80)]);
+        assert!(welcome.contains(tag), "version on welcome header:\n{welcome}");
+
+        let state = state_with(vec![cache_item(PathBuf::from("/tmp/.npm"), 2048)]);
+        let main = flatten(&[main_header(&state, 80)]);
+        assert!(main.contains(tag), "version on main header:\n{main}");
+    }
+
+    /// At a narrow width the tag degrades out rather than pushing the existing
+    /// header content off-screen (issue #30).
+    #[test]
+    fn version_tag_dropped_when_header_too_narrow() {
+        let tag = concat!("v", env!("CARGO_PKG_VERSION"));
+        let root = PathBuf::from("/tmp");
+        let narrow = flatten(&[loading_header(&root, 10)]);
+        assert!(
+            !narrow.contains(tag),
+            "version dropped when too narrow:\n{narrow}"
+        );
     }
 }
