@@ -17,7 +17,7 @@ use scan::human;
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "macclean", about = "Classify and reclaim disk usage, safely.")]
+#[command(name = "macclean", version, about = "Classify and reclaim disk usage, safely.")]
 struct Cli {
     /// Root to scan. Defaults to $HOME (full-disk requires --full-disk).
     #[arg(long, global = true)]
