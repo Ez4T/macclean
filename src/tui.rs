@@ -7,7 +7,7 @@ use crate::model::{Item, SafetyClass, Scan};
 use crate::reclaim::{self, Reclaimed};
 use crate::ruleset::Ruleset;
 use crate::scan::human;
-use crate::{classify, dedup};
+use crate::{classify, dedup, update};
 use anyhow::{anyhow, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{
     mpsc::{self, TryRecvError},
-    Arc,
+    Arc, Mutex,
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -285,7 +285,19 @@ pub fn run_scanning(root: PathBuf, ruleset: Ruleset, min_unclassified: u64) -> R
         let _ = tx.send(scan);
     });
 
-    let result = loading_loop(&mut terminal, root, ruleset, rx);
+    // The update check runs on its own thread so it never blocks or delays the
+    // Scan (issue #32). The render loop polls the shared slot; a missing/slow/
+    // failed check simply leaves it `None` and no banner is ever shown.
+    let update: UpdateHandle = Arc::new(Mutex::new(None));
+    let update_worker = Arc::clone(&update);
+    thread::spawn(move || {
+        let result = update::check_for_update();
+        if let Ok(mut slot) = update_worker.lock() {
+            *slot = Some(result);
+        }
+    });
+
+    let result = loading_loop(&mut terminal, root, ruleset, rx, update);
     ratatui::restore();
     result
 }
@@ -295,6 +307,7 @@ fn loading_loop(
     root: PathBuf,
     ruleset: Ruleset,
     rx: mpsc::Receiver<Scan>,
+    update: UpdateHandle,
 ) -> Result<()> {
     let started = Instant::now();
     let mut tick = 0usize;
@@ -303,13 +316,14 @@ fn loading_loop(
         match rx.try_recv() {
             Ok(scan) => {
                 let mut state = AppState::new(scan, ruleset);
-                return event_loop(terminal, &mut state);
+                return event_loop(terminal, &mut state, update);
             }
             Err(TryRecvError::Empty) => {}
             Err(TryRecvError::Disconnected) => return Err(anyhow!("scan worker stopped")),
         }
 
-        terminal.draw(|f| draw_loading(f, &root, started.elapsed(), tick))?;
+        let newer = newer_tag(&update);
+        terminal.draw(|f| draw_loading(f, &root, started.elapsed(), tick, newer.as_deref()))?;
         tick = tick.wrapping_add(1);
 
         if event::poll(Duration::from_millis(100))? {
@@ -324,11 +338,16 @@ fn loading_loop(
     }
 }
 
-fn event_loop(terminal: &mut ratatui::DefaultTerminal, state: &mut AppState) -> Result<()> {
+fn event_loop(
+    terminal: &mut ratatui::DefaultTerminal,
+    state: &mut AppState,
+    update: UpdateHandle,
+) -> Result<()> {
     let mut tick = 0usize;
     loop {
         drain_reclaim_messages(state);
-        terminal.draw(|f| draw(f, state, tick))?;
+        let newer = newer_tag(&update);
+        terminal.draw(|f| draw(f, state, tick, newer.as_deref()))?;
         tick = tick.wrapping_add(1);
 
         if matches!(state.mode, Mode::Reclaiming) {
@@ -418,6 +437,40 @@ const WORDMARK_PLAIN: &str = "macclean";
 /// The running build's version tag (issue #30), e.g. `v0.1.0`. Sourced from the
 /// package version at compile time so it is never hard-coded and never drifts.
 const VERSION_TAG: &str = concat!("v", env!("CARGO_PKG_VERSION"));
+
+/// Shared slot for the background update check (issue #32). `None` while the
+/// check is still in flight; the worker thread fills it once with the outcome.
+type UpdateHandle = Arc<Mutex<Option<update::UpdateCheck>>>;
+
+/// Read the shared update check and return the newer version tag to banner, or
+/// `None` when the check is in-flight, up to date, offline, or errored. Only a
+/// `Newer` result ever surfaces — everything else stays silent (issue #32).
+fn newer_tag(handle: &UpdateHandle) -> Option<String> {
+    match handle.lock().ok()?.as_ref()? {
+        update::UpdateCheck::Newer { latest, .. } => Some(latest.tag()),
+        _ => None,
+    }
+}
+
+/// Build the subtle "update available" banner for `newer` within a one-line
+/// `width` (issue #32). When the full version + reinstall one-liner fits it shows
+/// both; at narrow widths it degrades to just the availability notice so it never
+/// overflows or breaks the responsive layout. `None` when nothing is newer, so
+/// callers render no banner row at all.
+fn update_banner(newer: Option<&str>, width: usize) -> Option<Line<'static>> {
+    let tag = newer?;
+    let short = format!(" ⬆ {tag} available");
+    let full = format!("{short} · reinstall: {}", update::INSTALL_ONE_LINER);
+    let text = if full.chars().count() <= width {
+        full
+    } else {
+        short
+    };
+    Some(Line::from(Span::styled(
+        text,
+        Style::default().fg(Color::Cyan).bold(),
+    )))
+}
 
 /// Append [`VERSION_TAG`] right-aligned within a one-line header `width`, dimmed
 /// so it stays unobtrusive (issue #30). It is only added when it fits after the
@@ -647,17 +700,25 @@ fn loading_header(root: &Path, width: usize) -> Line<'static> {
     Line::from(spans)
 }
 
-fn draw_loading(f: &mut Frame, root: &Path, elapsed: Duration, tick: usize) {
-    let [header, body, footer] = Layout::vertical([
+fn draw_loading(f: &mut Frame, root: &Path, elapsed: Duration, tick: usize, newer: Option<&str>) {
+    let area = f.area();
+    // The banner row only exists when an update is available; otherwise it is a
+    // zero-height band that renders nothing and leaves the layout untouched.
+    let banner = update_banner(newer, area.width as usize);
+    let [header, banner_area, body, footer] = Layout::vertical([
         Constraint::Length(1),
+        Constraint::Length(banner.is_some() as u16),
         Constraint::Min(1),
         Constraint::Length(3),
     ])
-    .areas(f.area());
+    .areas(area);
     let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
     let spinner = frames[tick % frames.len()];
 
     f.render_widget(loading_header(root, header.width as usize), header);
+    if let Some(line) = banner {
+        f.render_widget(Paragraph::new(line), banner_area);
+    }
 
     let scan_block = Block::default().borders(Borders::ALL).title(" Scan ");
     let inner = scan_block.inner(body);
@@ -1392,16 +1453,24 @@ fn main_header(state: &AppState, width: usize) -> Line<'static> {
     Line::from(header_spans)
 }
 
-fn draw(f: &mut Frame, state: &AppState, tick: usize) {
-    let [header, body, detail, footer] = Layout::vertical([
+fn draw(f: &mut Frame, state: &AppState, tick: usize, newer: Option<&str>) {
+    let area = f.area();
+    // A subtle "update available" banner sits directly under the results header
+    // when a newer release exists (issue #32); otherwise the band is zero-height.
+    let banner = update_banner(newer, area.width as usize);
+    let [header, banner_area, body, detail, footer] = Layout::vertical([
         Constraint::Length(1),
+        Constraint::Length(banner.is_some() as u16),
         Constraint::Min(1),
         Constraint::Length(1),
         Constraint::Length(3),
     ])
-    .areas(f.area());
+    .areas(area);
 
     f.render_widget(main_header(state, header.width as usize), header);
+    if let Some(line) = banner {
+        f.render_widget(Paragraph::new(line), banner_area);
+    }
 
     // Optional overview pane (issue #7): split the body so a proportional
     // on-disk-usage bar chart sits to the left of the action list. The list keeps
@@ -2908,6 +2977,70 @@ mod tests {
         assert!(
             !narrow.contains(tag),
             "version dropped when too narrow:\n{narrow}"
+        );
+    }
+
+    fn version(major: u32, minor: u32, patch: u32) -> update::Version {
+        update::Version {
+            major,
+            minor,
+            patch,
+        }
+    }
+
+    /// Only a `Newer` check surfaces a banner tag (issue #32): up-to-date, errored,
+    /// and still-in-flight (`None`) all stay silent so no banner is drawn.
+    #[test]
+    fn newer_tag_only_surfaces_for_newer() {
+        let handle: UpdateHandle = Arc::new(Mutex::new(None));
+        // In-flight: nothing yet.
+        assert_eq!(newer_tag(&handle), None);
+
+        *handle.lock().unwrap() = Some(update::UpdateCheck::Newer {
+            current: version(0, 1, 0),
+            latest: version(0, 2, 0),
+        });
+        assert_eq!(newer_tag(&handle), Some("v0.2.0".to_string()));
+
+        *handle.lock().unwrap() = Some(update::UpdateCheck::UpToDate {
+            current: version(0, 1, 0),
+        });
+        assert_eq!(newer_tag(&handle), None);
+
+        *handle.lock().unwrap() = Some(update::UpdateCheck::Failed {
+            reason: "offline".into(),
+        });
+        assert_eq!(newer_tag(&handle), None);
+    }
+
+    /// The banner renders with the version and reinstall hint when a newer release
+    /// is reported, and is absent (no row) when there is nothing newer (issue #32).
+    #[test]
+    fn update_banner_present_when_newer_absent_otherwise() {
+        let banner = update_banner(Some("v0.2.0"), 120).expect("banner when newer");
+        let text = flatten(&[banner]);
+        assert!(text.contains("v0.2.0"), "banner shows version:\n{text}");
+        assert!(
+            text.contains("reinstall") && text.contains("curl"),
+            "banner carries the reinstall one-liner:\n{text}"
+        );
+
+        assert!(
+            update_banner(None, 120).is_none(),
+            "no banner row when nothing is newer"
+        );
+    }
+
+    /// At a narrow width the banner degrades to just the availability notice so it
+    /// never overflows the responsive layout (issue #32).
+    #[test]
+    fn update_banner_degrades_at_narrow_width() {
+        let banner = update_banner(Some("v0.2.0"), 24).expect("banner when newer");
+        let text = flatten(&[banner]);
+        assert!(text.contains("v0.2.0 available"), "availability kept:\n{text}");
+        assert!(
+            !text.contains("reinstall"),
+            "reinstall hint dropped when narrow:\n{text}"
         );
     }
 }
