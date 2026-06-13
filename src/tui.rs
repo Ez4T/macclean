@@ -405,6 +405,217 @@ fn handle_key(state: &mut AppState, code: KeyCode) -> bool {
     false
 }
 
+/// Vendored figlet "Small" rendering of `macclean` (issue #28). Hard-coded as a
+/// constant — no `figlet`/font dependency — to match the hand-rolled rendering
+/// style. The narrower [`WORDMARK_PLAIN`] is the responsive fallback.
+const WORDMARK_FIGLET: [&str; 3] = [
+    " _ __  __ _ __| |___ __ _ _ _",
+    "| '  \\/ _` / _| / -_) _` | ' \\",
+    "|_|_|_\\__,_\\__|_\\___\\__,_|_||_|",
+];
+const WORDMARK_PLAIN: &str = "macclean";
+
+/// Static sitting cat tucked to the left of the spinner so the during-scan
+/// screen reads as "the cat is scanning". No animation — the spinner is the
+/// single source of motion (issue #28). [`CAT_COMPACT`] is the height fallback.
+const CAT: [&str; 5] = [
+    "  /\\_/\\",
+    " ( o.o )",
+    "  > ^ <",
+    " /  ~  \\",
+    "(_______)",
+];
+const CAT_COMPACT: [&str; 3] = [" /\\_/\\", "( o.o )", " > ^ <"];
+
+/// Purpose line (no greeting — the wordmark already shows the name) and the
+/// secondary reassurance shown beside the cat while sizing runs.
+const LOADING_PURPOSE: &str = "Disk space, classified by how safe it is to reclaim.";
+const LOADING_HINT: &str = "Large trees take a while to size.";
+
+/// Two columns between the cat art and the status/hint text beside it.
+const CAT_GAP: usize = 2;
+
+fn line_width(line: &Line) -> usize {
+    line.spans.iter().map(|s| s.content.chars().count()).sum()
+}
+
+fn max_width(lines: &[&str]) -> usize {
+    lines.iter().map(|l| l.chars().count()).max().unwrap_or(0)
+}
+
+/// Greedy word-wrap so the purpose line keeps its full meaning at medium widths
+/// instead of being truncated or dropped (the mockup wraps it in a ~48-col box).
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    let mut lines = Vec::new();
+    let mut cur = String::new();
+    for word in text.split_whitespace() {
+        if cur.is_empty() {
+            cur = word.to_string();
+        } else if cur.chars().count() + 1 + word.chars().count() <= width {
+            cur.push(' ');
+            cur.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut cur));
+            cur = word.to_string();
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
+}
+
+/// The spinner glyph (yellow, bold) followed by the live elapsed status. Always
+/// present in every degrade tier — it is never dropped (issue #28).
+fn spinner_status_line(spinner: &str, seconds: u64) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            spinner.to_string(),
+            Style::default().fg(Color::Yellow).bold(),
+        ),
+        Span::styled(
+            format!(" Scan running for {seconds}s"),
+            Style::default().fg(Color::Yellow),
+        ),
+    ])
+}
+
+/// Render the cat as bold lines, embedding the spinner/status on `spinner_row`
+/// and the hint on `hint_row` (when present) so they sit to the right of the
+/// art. `width` is the cat's column width; rows are padded to it plus [`CAT_GAP`].
+fn cat_block_lines(
+    art: &[&str],
+    width: usize,
+    spinner_row: usize,
+    hint_row: Option<usize>,
+    spinner: &str,
+    seconds: u64,
+) -> Vec<Line<'static>> {
+    let left_col = |line: &str| {
+        let pad = width.saturating_sub(line.chars().count()) + CAT_GAP;
+        format!("{line}{}", " ".repeat(pad))
+    };
+    art.iter()
+        .enumerate()
+        .map(|(i, &line)| {
+            if i == spinner_row {
+                Line::from(vec![
+                    Span::raw(left_col(line)).bold(),
+                    Span::styled(
+                        spinner.to_string(),
+                        Style::default().fg(Color::Yellow).bold(),
+                    ),
+                    Span::styled(
+                        format!(" Scan running for {seconds}s"),
+                        Style::default().fg(Color::Yellow),
+                    ),
+                ])
+            } else if hint_row == Some(i) {
+                Line::from(vec![
+                    Span::raw(left_col(line)).bold(),
+                    Span::raw(LOADING_HINT.to_string()),
+                ])
+            } else {
+                Line::from(Span::raw(line.to_string()).bold())
+            }
+        })
+        .collect()
+}
+
+/// Compose the during-scan body for the given inner dimensions, picking the
+/// richest tier that fits and degrading per issue #28: drop the hint, then the
+/// purpose, then collapse the figlet to plain text, then shrink the 5-line cat
+/// to the compact 3-line cat, then drop the cat — never the spinner/status.
+fn loading_body_lines(w: usize, h: usize, spinner: &str, seconds: u64) -> Vec<Line<'static>> {
+    let figlet_w = max_width(&WORDMARK_FIGLET);
+    let cat5_w = max_width(&CAT);
+    let cat3_w = max_width(&CAT_COMPACT);
+    let status_w = spinner.chars().count() + format!(" Scan running for {seconds}s").chars().count();
+    let hint_fits = w >= cat5_w + CAT_GAP + LOADING_HINT.chars().count();
+
+    let figlet = || {
+        WORDMARK_FIGLET
+            .iter()
+            .map(|l| Line::from(Span::raw(l.to_string()).bold()))
+            .collect::<Vec<_>>()
+    };
+    let plain = || Line::from(Span::raw(WORDMARK_PLAIN).bold());
+    let blank = || Line::from("");
+
+    // A — full: figlet + purpose + 5-line cat (+ hint). The purpose wraps to the
+    // available width (one line when it fits) rather than being dropped.
+    if w >= figlet_w && w >= cat5_w + CAT_GAP + status_w {
+        let purpose = wrap_words(LOADING_PURPOSE, w);
+        if h >= 3 + 1 + purpose.len() + 1 + 5 {
+            let mut lines = figlet();
+            lines.push(blank());
+            lines.extend(purpose.into_iter().map(Line::from));
+            lines.push(blank());
+            lines.extend(cat_block_lines(
+                &CAT,
+                cat5_w,
+                2,
+                hint_fits.then_some(3),
+                spinner,
+                seconds,
+            ));
+            return lines;
+        }
+    }
+    // B — drop purpose: figlet + 5-line cat.
+    if h >= 9 && w >= figlet_w && w >= cat5_w + CAT_GAP + status_w {
+        let mut lines = figlet();
+        lines.push(blank());
+        lines.extend(cat_block_lines(
+            &CAT,
+            cat5_w,
+            2,
+            hint_fits.then_some(3),
+            spinner,
+            seconds,
+        ));
+        return lines;
+    }
+    // C — collapse figlet: plain wordmark + 5-line cat.
+    if h >= 7 && w >= cat5_w + CAT_GAP + status_w {
+        let mut lines = vec![plain(), blank()];
+        lines.extend(cat_block_lines(
+            &CAT,
+            cat5_w,
+            2,
+            hint_fits.then_some(3),
+            spinner,
+            seconds,
+        ));
+        return lines;
+    }
+    // D — shrink cat: plain wordmark + compact cat.
+    if h >= 5 && w >= cat3_w + CAT_GAP + status_w {
+        let mut lines = vec![plain(), blank()];
+        lines.extend(cat_block_lines(
+            &CAT_COMPACT,
+            cat3_w,
+            1,
+            None,
+            spinner,
+            seconds,
+        ));
+        return lines;
+    }
+    // E — drop cat: plain wordmark + spinner/status (≈ today's screen).
+    if h >= 3 && w >= status_w {
+        return vec![plain(), blank(), spinner_status_line(spinner, seconds)];
+    }
+    // F — minimal: spinner/status only, never dropped.
+    vec![spinner_status_line(spinner, seconds)]
+}
+
 fn draw_loading(f: &mut Frame, root: &Path, elapsed: Duration, tick: usize) {
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(1),
@@ -423,20 +634,28 @@ fn draw_loading(f: &mut Frame, root: &Path, elapsed: Duration, tick: usize) {
         header,
     );
 
+    let scan_block = Block::default().borders(Borders::ALL).title(" Scan ");
+    let inner = scan_block.inner(body);
     let seconds = elapsed.as_secs();
-    let panel = Paragraph::new(vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::raw("  "),
-            Span::styled(spinner, Style::default().fg(Color::Yellow).bold()),
-            Span::raw(format!(" Scan running for {seconds}s")),
-        ]),
-        Line::from(""),
-        Line::from("  Large dependency trees and VM/data directories can take a while to size."),
-    ])
-    .wrap(Wrap { trim: true })
-    .block(Block::default().borders(Borders::ALL).title(" Scan "));
-    f.render_widget(panel, body);
+    let mut content = loading_body_lines(inner.width as usize, inner.height as usize, spinner, seconds);
+
+    // Block-center horizontally: one shared left margin keeps the wordmark, cat,
+    // and copy reading as a single unit (per-line centering would skew the art).
+    let content_w = content.iter().map(line_width).max().unwrap_or(0);
+    let left = (inner.width as usize).saturating_sub(content_w) / 2;
+    if left > 0 {
+        for line in &mut content {
+            line.spans.insert(0, Span::raw(" ".repeat(left)));
+        }
+    }
+
+    // Block-center vertically with leading blank lines.
+    let top = (inner.height as usize).saturating_sub(content.len()) / 2;
+    let mut lines: Vec<Line> = Vec::with_capacity(top + content.len());
+    lines.resize(top, Line::from(""));
+    lines.extend(content);
+
+    f.render_widget(Paragraph::new(lines).block(scan_block), body);
 
     f.render_widget(
         Paragraph::new(" q/Esc quit ")
@@ -2538,5 +2757,96 @@ mod tests {
             ],
             "Reinstallable precedes Cache (CLASS_ORDER); Protected is absent"
         );
+    }
+
+    fn flatten(lines: &[Line]) -> String {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// At full size the during-scan body shows the figlet wordmark, the 5-line
+    /// cat, the purpose line, the beside-cat hint, and the live spinner status.
+    #[test]
+    fn loading_full_tier_shows_wordmark_cat_purpose_and_status() {
+        let text = flatten(&loading_body_lines(80, 24, "⠹", 3));
+        assert!(text.contains("|_||_|"), "figlet wordmark present:\n{text}");
+        assert!(text.contains("(_______)"), "5-line cat present:\n{text}");
+        assert!(
+            text.contains("classified by how safe"),
+            "purpose line present:\n{text}"
+        );
+        assert!(text.contains("Large trees"), "hint present:\n{text}");
+        assert!(
+            text.contains("Scan running for 3s"),
+            "spinner status present:\n{text}"
+        );
+    }
+
+    /// Too narrow for the ~31-col figlet collapses the wordmark to plain bold
+    /// text; the spinner status is never dropped.
+    #[test]
+    fn loading_narrow_collapses_figlet_to_plain_wordmark() {
+        let text = flatten(&loading_body_lines(28, 24, "⠹", 0));
+        assert!(!text.contains("|_||_|"), "figlet dropped when narrow:\n{text}");
+        assert!(text.contains("macclean"), "plain wordmark shown:\n{text}");
+        assert!(
+            text.contains("Scan running for 0s"),
+            "spinner always present:\n{text}"
+        );
+    }
+
+    /// A short-but-wide terminal drops the purpose and figlet first but protects
+    /// the cat — it degrades after the copy and wordmark, not before.
+    #[test]
+    fn loading_protects_cat_over_purpose_and_figlet() {
+        let text = flatten(&loading_body_lines(80, 8, "⠹", 1));
+        assert!(
+            text.contains("(_______)"),
+            "cat retained when height is tight:\n{text}"
+        );
+        assert!(
+            !text.contains("classified by how safe"),
+            "purpose dropped first:\n{text}"
+        );
+        assert!(text.contains("macclean"), "plain wordmark shown:\n{text}");
+    }
+
+    /// As height shrinks further the 5-line cat shrinks to the compact 3-line
+    /// cat before the cat is dropped entirely.
+    #[test]
+    fn loading_shrinks_to_compact_cat_before_dropping_it() {
+        let text = flatten(&loading_body_lines(40, 6, "⠹", 0));
+        assert!(text.contains("> ^ <"), "compact cat retained:\n{text}");
+        assert!(!text.contains("(_______)"), "5-line cat dropped:\n{text}");
+        assert!(
+            text.contains("Scan running for 0s"),
+            "spinner always present:\n{text}"
+        );
+    }
+
+    /// The spinner status is the one element that survives every degrade tier,
+    /// down to a single line; at minimal height it is rendered alone.
+    #[test]
+    fn loading_spinner_status_survives_all_sizes() {
+        for (w, h) in [(80usize, 24usize), (40, 12), (31, 8), (20, 2), (8, 1)] {
+            let lines = loading_body_lines(w, h, "⠙", 7);
+            let text = flatten(&lines);
+            assert!(
+                text.contains("Scan running for 7s"),
+                "spinner status missing at {w}x{h}:\n{text}"
+            );
+        }
+        // At the minimal tier nothing but the spinner status is drawn.
+        let minimal = loading_body_lines(80, 2, "⠙", 7);
+        assert_eq!(minimal.len(), 1, "minimal tier is a single line");
+        assert!(!flatten(&minimal).contains("(_______)"), "no cat at h=2");
     }
 }
