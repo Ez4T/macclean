@@ -5,9 +5,9 @@
 //! * **ADR-0004** — the four Reclaimable classes delete permanently; a manually
 //!   overridden `Unclassified` Item goes to the Trash instead.
 
+use crate::classify::match_rule;
 use crate::model::{Item, SafetyClass};
 use crate::ruleset::Ruleset;
-use crate::classify::match_rule;
 use anyhow::{bail, Context, Result};
 use std::process::Command;
 
@@ -17,6 +17,29 @@ pub enum Reclaimed {
     ToolClean { command: String },
     Removed,
     Trashed,
+}
+
+/// Human-facing description of the action Reclaim is about to attempt. This is
+/// used by the TUI progress overlay; the actual guardrails still live in
+/// [`reclaim`].
+pub(crate) fn planned_action(item: &Item, ruleset: &Ruleset) -> String {
+    if item.class == SafetyClass::Unclassified {
+        return "Moving to Trash".into();
+    }
+
+    if let Some(rule) = match_rule(ruleset, &item.path) {
+        if let Some(cmd) = &rule.clean_command {
+            if tool_available(cmd) {
+                return format!("Waiting for {cmd}");
+            }
+        }
+    }
+
+    if item.path.is_dir() {
+        "Removing directory".into()
+    } else {
+        "Removing file".into()
+    }
 }
 
 /// Reclaim a single Item. Refuses anything not currently reclaimable
@@ -33,8 +56,7 @@ pub fn reclaim(item: &Item, ruleset: &Ruleset) -> Result<Reclaimed> {
 
     // ADR-0004: overridden Unclassified → Trash (safety net), never permanent.
     if item.class == SafetyClass::Unclassified {
-        trash::delete(&item.path)
-            .with_context(|| format!("trashing {}", item.path.display()))?;
+        trash::delete(&item.path).with_context(|| format!("trashing {}", item.path.display()))?;
         return Ok(Reclaimed::Trashed);
     }
 
@@ -44,7 +66,9 @@ pub fn reclaim(item: &Item, ruleset: &Ruleset) -> Result<Reclaimed> {
         if let Some(cmd) = &rule.clean_command {
             if tool_available(cmd) {
                 run_clean(cmd, &item.path)?;
-                return Ok(Reclaimed::ToolClean { command: cmd.clone() });
+                return Ok(Reclaimed::ToolClean {
+                    command: cmd.clone(),
+                });
             }
         }
     }
@@ -77,9 +101,7 @@ fn tool_available(command: &str) -> bool {
 /// Run the clean command in the Item's parent directory (where the toolchain
 /// expects to find its project manifest).
 fn run_clean(command: &str, item_path: &std::path::Path) -> Result<()> {
-    let cwd = item_path
-        .parent()
-        .context("item has no parent directory")?;
+    let cwd = item_path.parent().context("item has no parent directory")?;
     let status = Command::new("sh")
         .arg("-c")
         .arg(command)
@@ -106,7 +128,9 @@ mod tests {
             size_on_disk: 4096,
             class,
             recovery: RecoveryMethod::None,
-            evidence: Evidence { summary: "fixture".into() },
+            evidence: Evidence {
+                summary: "fixture".into(),
+            },
             override_reclaim,
         }
     }
@@ -135,7 +159,10 @@ mod tests {
 
         let it = item(mystery.clone(), SafetyClass::Unclassified, false);
         assert!(reclaim(&it, &Ruleset::defaults()).is_err());
-        assert!(mystery.exists(), "un-overridden Unclassified is never deleted");
+        assert!(
+            mystery.exists(),
+            "un-overridden Unclassified is never deleted"
+        );
     }
 
     /// Destination by class (ADR-0004): an *overridden* Unclassified Item is routed
@@ -171,7 +198,9 @@ mod tests {
         let ruleset = Ruleset {
             rules: vec![Rule {
                 name: "fixture-clean".into(),
-                matches: Match::DirNamed { dir: "buildcache".into() },
+                matches: Match::DirNamed {
+                    dir: "buildcache".into(),
+                },
                 class: SafetyClass::Regenerable,
                 clean_command: Some("true".into()),
                 recover_command: Some("make".into()),
