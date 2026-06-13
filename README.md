@@ -44,9 +44,11 @@ macclean --full-disk
 The TUI opens immediately with a scan screen while filesystem sizing runs in the
 background.
 
-In the TUI: `↑/↓` move · `o` override an Unclassified item · `t` toggle the
-on-disk-size overview pane · `c` Confirm reclaim · `q` quit. While a group
-Reclaim is running, `s` or `Esc` stops before the next Item starts.
+In the TUI: `↑/↓` move · `Space` tick the highlighted Item or group into a
+multi-selection · `a` select/clear all reclaimable Items scan-wide · `o` override
+an Unclassified item · `t` toggle the on-disk-size overview pane · `c` Confirm
+reclaim (the selection if one is built, else the highlighted group/Item) · `q`
+quit. While a Reclaim is running, `s` or `Esc` stops before the next Item starts.
 
 ## From source
 
