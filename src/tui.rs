@@ -4,17 +4,22 @@
 //! to deletion skips it), and `Unclassified` Items must be overridden first
 //! (ADR-0001).
 
+use crate::{classify, dedup};
 use crate::model::{Item, SafetyClass, Scan};
 use crate::reclaim::{self, Reclaimed};
 use crate::ruleset::Ruleset;
 use crate::scan::human;
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
+use std::path::PathBuf;
+use std::sync::mpsc::{self, TryRecvError};
+use std::thread;
+use std::time::{Duration, Instant};
 
 fn class_color(class: SafetyClass) -> Color {
     match class {
@@ -47,26 +52,72 @@ struct AppState {
     show_overview: bool,
 }
 
-pub fn run(scan: Scan, ruleset: Ruleset) -> Result<()> {
-    let mut terminal = ratatui::init();
-    let mut state = AppState {
-        list: {
-            let mut s = ListState::default();
-            if !scan.items.is_empty() {
-                s.select(Some(0));
-            }
-            s
-        },
-        scan,
-        ruleset,
-        mode: Mode::Browse,
-        status: "↑/↓ move · o override · t overview · c/Enter Confirm reclaim · q quit".into(),
-        show_overview: false,
-    };
+impl AppState {
+    fn new(scan: Scan, ruleset: Ruleset) -> Self {
+        let mut list = ListState::default();
+        if !scan.items.is_empty() {
+            list.select(Some(0));
+        }
+        Self {
+            scan,
+            ruleset,
+            list,
+            mode: Mode::Browse,
+            status: "↑/↓ move · o override · t overview · c/Enter Confirm reclaim · q quit".into(),
+            show_overview: false,
+        }
+    }
+}
 
-    let result = event_loop(&mut terminal, &mut state);
+pub fn run_scanning(root: PathBuf, ruleset: Ruleset, min_unclassified: u64) -> Result<()> {
+    let mut terminal = ratatui::init();
+    let (tx, rx) = mpsc::channel();
+    let scan_root = root.clone();
+    let scan_ruleset = ruleset.clone();
+
+    thread::spawn(move || {
+        let mut scan = classify::run(&scan_root, &scan_ruleset, min_unclassified);
+        dedup::analyze(&mut scan);
+        let _ = tx.send(scan);
+    });
+
+    let result = loading_loop(&mut terminal, root, ruleset, rx);
     ratatui::restore();
     result
+}
+
+fn loading_loop(
+    terminal: &mut ratatui::DefaultTerminal,
+    root: PathBuf,
+    ruleset: Ruleset,
+    rx: mpsc::Receiver<Scan>,
+) -> Result<()> {
+    let started = Instant::now();
+    let mut tick = 0usize;
+
+    loop {
+        match rx.try_recv() {
+            Ok(scan) => {
+                let mut state = AppState::new(scan, ruleset);
+                return event_loop(terminal, &mut state);
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => return Err(anyhow!("scan worker stopped")),
+        }
+
+        terminal.draw(|f| draw_loading(f, &root, started.elapsed(), tick))?;
+        tick = tick.wrapping_add(1);
+
+        if event::poll(Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press
+                    && matches!(key.code, KeyCode::Char('q') | KeyCode::Esc)
+                {
+                    return Ok(());
+                }
+            }
+        }
+    }
 }
 
 fn event_loop(terminal: &mut ratatui::DefaultTerminal, state: &mut AppState) -> Result<()> {
@@ -108,6 +159,50 @@ fn handle_key(state: &mut AppState, code: KeyCode) -> bool {
         _ => {}
     }
     false
+}
+
+fn draw_loading(f: &mut Frame, root: &PathBuf, elapsed: Duration, tick: usize) {
+    let [header, body, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(3),
+    ])
+    .areas(f.area());
+    let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let spinner = frames[tick % frames.len()];
+
+    f.render_widget(
+        Line::from(vec![
+            Span::raw(format!(" {}  ", root.display())).bold(),
+            Span::styled(
+                "· scanning filesystem",
+                Style::default().fg(Color::Yellow),
+            ),
+        ]),
+        header,
+    );
+
+    let seconds = elapsed.as_secs();
+    let panel = Paragraph::new(vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::raw("  "),
+            Span::styled(spinner, Style::default().fg(Color::Yellow).bold()),
+            Span::raw(format!(" Scan running for {seconds}s")),
+        ]),
+        Line::from(""),
+        Line::from("  Large dependency trees and VM/data directories can take a while to size."),
+    ])
+    .wrap(Wrap { trim: true })
+    .block(Block::default().borders(Borders::ALL).title(" Scan "));
+    f.render_widget(panel, body);
+
+    f.render_widget(
+        Paragraph::new(" q/Esc quit ")
+            .wrap(Wrap { trim: true })
+            .block(Block::default().borders(Borders::ALL)),
+        footer,
+    );
 }
 
 fn move_sel(state: &mut AppState, delta: i32) {
