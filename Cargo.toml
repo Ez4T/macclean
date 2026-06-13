@@ -15,7 +15,9 @@ path = "src/main.rs"
 
 [dependencies]
 # Scan
-jwalk = "0.8"           # parallel directory walking
+libc = "0.2"            # fd-relative openat/fstatat traversal
+rayon = "1"             # parallel Scan subtrees
+jwalk = "0.8"           # directory walking for Redundant Copy fingerprints
 blake3 = "1"            # fast checksums for Redundant Copy detection
 
 # Ruleset (data-driven, ADR-0003)

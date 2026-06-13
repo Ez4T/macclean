@@ -2,18 +2,10 @@
 //! apparent file length (ADR-0006), so sparse images and clones are not
 //! overstated.
 
-use std::os::unix::fs::MetadataExt;
-
-/// Actual on-disk bytes for a single path's own metadata: allocated 512-byte
-/// blocks (ADR-0006), not `len()`.
-///
-/// Whole-subtree totals are no longer summed here: [`crate::classify`] walks the
-/// tree once in parallel and folds these per-entry blocks itself, so a separate
-/// recursive re-walk per matched directory is gone.
-pub fn entry_on_disk_bytes(meta: &std::fs::Metadata) -> u64 {
-    // `blocks()` counts 512-byte units actually allocated; sparse holes and
-    // unwritten regions are excluded.
-    meta.blocks() * 512
+/// Convert allocated 512-byte block counts into actual on-disk bytes
+/// (ADR-0006), not apparent file length.
+pub fn on_disk_bytes_from_blocks(blocks_512: i64) -> u64 {
+    u64::try_from(blocks_512).unwrap_or(0).saturating_mul(512)
 }
 
 /// Human-friendly size, matching the `du -h` style used throughout the project.

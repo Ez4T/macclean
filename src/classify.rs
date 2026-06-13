@@ -2,30 +2,21 @@
 //! classified [`Item`]s. Anything large that no Rule matches becomes
 //! `Unclassified` rather than being guessed at (the fail-safe of ADR-0001).
 //!
-//! The tree is walked exactly once, in parallel: jwalk's worker threads run
-//! every syscall (each entry's `lstat` for its on-disk size, plus the
-//! filesystem probes some Rules need, like the `PG_VERSION` marker) inside
-//! `process_read_dir`, storing the results on each entry. The consumer then
-//! folds jwalk's strict depth-first stream with a small depth-indexed stack and
-//! no further syscalls — so the cost is one parallel stat per file, which is the
-//! floor ADR-0006 imposes, rather than a serial stat plus a re-walk per match.
+//! The tree is walked exactly once with an fd-relative walker: each directory is
+//! held open while its children are measured with `fstatat(AT_SYMLINK_NOFOLLOW)`
+//! and child directories are opened with `openat`. That keeps per-entry stats
+//! independent of path depth while preserving the strict depth-first stream the
+//! classify fold consumes.
 
 use crate::model::{Evidence, Item, RecoveryMethod, SafetyClass, Scan};
 use crate::ruleset::{Match, Rule, Ruleset};
-use crate::scan::entry_on_disk_bytes;
-use jwalk::rayon::prelude::*;
-use jwalk::WalkDirGeneric;
+use crate::scan::on_disk_bytes_from_blocks;
+use rayon::prelude::*;
+use std::ffi::{CStr, CString, OsString};
+use std::mem::MaybeUninit;
+use std::os::fd::{AsRawFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
-
-/// Per-entry facts computed in parallel on jwalk's worker threads: the entry's
-/// own on-disk bytes (allocated blocks, ADR-0006) and the index of the first
-/// Rule it matches, if any. Carried on each [`jwalk::DirEntry`] so the consumer
-/// fold needs no Ruleset borrow and no syscalls.
-type EntryFacts = (u64, Option<usize>);
-
-/// The walk specialized to carry [`EntryFacts`] per entry (no per-directory
-/// state is needed, so the read-dir state is `()`).
-type ClassifyWalk = WalkDirGeneric<((), EntryFacts)>;
 
 /// First Rule whose [`Match`] applies to `path`, in Ruleset order (user rules
 /// first — see [`Ruleset::with_user_rules`]). Determines `is_dir` itself with a
@@ -40,30 +31,86 @@ pub fn match_rule_typed<'a>(ruleset: &'a Ruleset, path: &Path, is_dir: bool) -> 
     match_rule_index(ruleset, path, is_dir).map(|i| &ruleset.rules[i])
 }
 
-/// Index of the first matching Rule — the form the parallel walk stores on each
-/// entry, since a `usize` can ride along in [`EntryFacts`] where a `&Rule`
-/// borrow could not.
+/// Index of the first matching Rule — the compact form the fd-relative walk
+/// stores on each measured entry before the fold turns it into an Item.
 fn match_rule_index(ruleset: &Ruleset, path: &Path, is_dir: bool) -> Option<usize> {
+    let probe = PathRuleProbe { path };
+    match_rule_index_with_probe(ruleset, path, is_dir, &probe)
+}
+
+fn match_rule_index_with_probe(
+    ruleset: &Ruleset,
+    path: &Path,
+    is_dir: bool,
+    probe: &impl MatchProbe,
+) -> Option<usize> {
     ruleset
         .rules
         .iter()
-        .position(|rule| matches_path(&rule.matches, path, is_dir))
+        .position(|rule| matches_path(&rule.matches, path, is_dir, probe))
 }
 
-fn matches_path(m: &Match, path: &Path, is_dir: bool) -> bool {
+trait MatchProbe {
+    fn sibling_exists(&self, sibling: &str) -> bool;
+    fn child_exists(&self, child: &str) -> bool;
+}
+
+struct PathRuleProbe<'a> {
+    path: &'a Path,
+}
+
+impl MatchProbe for PathRuleProbe<'_> {
+    fn sibling_exists(&self, sibling: &str) -> bool {
+        self.path
+            .parent()
+            .map(|p| p.join(sibling).exists())
+            .unwrap_or(false)
+    }
+
+    fn child_exists(&self, child: &str) -> bool {
+        self.path.join(child).exists()
+    }
+}
+
+struct FdRuleProbe<'a> {
+    path: &'a Path,
+    parent_fd: Option<RawFd>,
+    entry_name: Option<&'a CStr>,
+    dir_fd: Option<RawFd>,
+}
+
+impl MatchProbe for FdRuleProbe<'_> {
+    fn sibling_exists(&self, sibling: &str) -> bool {
+        self.parent_fd
+            .map(|fd| fstatat_name_exists(fd, sibling))
+            .unwrap_or_else(|| {
+                self.path
+                    .parent()
+                    .map(|p| p.join(sibling).exists())
+                    .unwrap_or(false)
+            })
+    }
+
+    fn child_exists(&self, child: &str) -> bool {
+        if let Some(fd) = self.dir_fd {
+            return fstatat_name_exists(fd, child);
+        }
+        if let (Some(parent_fd), Some(entry_name)) = (self.parent_fd, self.entry_name) {
+            return fstatat_child_name_exists(parent_fd, entry_name, child);
+        }
+        self.path.join(child).exists()
+    }
+}
+
+fn matches_path(m: &Match, path: &Path, is_dir: bool, probe: &impl MatchProbe) -> bool {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
     match m {
         // The `Dir*` conditions only ever apply to directories.
         Match::DirNamed { dir: want } => is_dir && name == want,
         Match::DirBesideSibling { dir: want, sibling } => {
-            is_dir
-                && name == want
-                && path
-                    .parent()
-                    .map(|p| p.join(sibling).exists())
-                    .unwrap_or(false)
+            is_dir && name == want && probe.sibling_exists(sibling)
         }
-        Match::DirContainingFile { file } => is_dir && path.join(file).exists(),
+        Match::DirContainingFile { file } => is_dir && probe.child_exists(file),
         // Suffix conditions apply to files and directories alike.
         Match::PathSuffix { suffix } => path.to_string_lossy().ends_with(suffix.as_str()),
         Match::NameSuffix { suffix } => name.ends_with(suffix.as_str()),
@@ -71,8 +118,8 @@ fn matches_path(m: &Match, path: &Path, is_dir: bool) -> bool {
         Match::NameGlob { pattern } => glob_match(pattern, name),
         // Combinators (issue #8): the file type is threaded through unchanged so
         // nested `Dir*` conditions still see whether the Item is a directory.
-        Match::All { of } => of.iter().all(|m| matches_path(m, path, is_dir)),
-        Match::Any { of } => of.iter().any(|m| matches_path(m, path, is_dir)),
+        Match::All { of } => of.iter().all(|m| matches_path(m, path, is_dir, probe)),
+        Match::Any { of } => of.iter().any(|m| matches_path(m, path, is_dir, probe)),
     }
 }
 
@@ -129,45 +176,19 @@ fn recovery_for(rule: &Rule) -> RecoveryMethod {
 /// large-but-unmatched as `Unclassified`. `min_unclassified` is the on-disk
 /// threshold below which unmatched dirs are ignored (kept out of the way).
 ///
-/// One parallel pass: workers stat and match every entry (see [`EntryFacts`]),
-/// and the [`DirFrame`] fold turns the depth-first stream into Items without a
-/// second syscall — matched directories own their whole subtree (nested matches
+/// One parallel pass: the fd-relative walker stats and matches every entry, and
+/// the [`DirFrame`] fold turns the depth-first stream into Items without a
+/// second syscall. Matched directories own their whole subtree (nested matches
 /// pruned), and the largest match-free subtrees surface as `Unclassified`.
 pub fn run(root: &Path, ruleset: &Ruleset, min_unclassified: u64) -> Scan {
-    // The workers need their own copy of the Ruleset (the closure is `Send +
-    // Sync` and outlives this frame); the consumer keeps using the borrow.
-    let walk_ruleset = ruleset.clone();
-    let walk = ClassifyWalk::new(root)
-        .skip_hidden(false)
-        .process_read_dir(move |_depth, _path, _read_dir_state, children| {
-            // Runs on jwalk's rayon workers: do every syscall here so the
-            // consumer stays pure CPU. Each child gets one `lstat` for its
-            // on-disk size and its Rule match (which may itself stat, e.g. the
-            // `PG_VERSION` / sibling-marker probes) — both then fold in for free.
-            //
-            // jwalk parallelizes *across* directories, but a single directory
-            // with tens of thousands of flat entries (a packed cache) would stat
-            // them serially on one worker and dominate the wall clock. Fan the
-            // per-child stats out across the same rayon pool so a wide directory
-            // is no longer a serial bottleneck.
-            children.par_iter_mut().for_each(|child_result| {
-                if let Ok(child) = child_result {
-                    let path = child.path();
-                    let is_dir = child.file_type().is_dir();
-                    let bytes = child.metadata().map(|m| entry_on_disk_bytes(&m)).unwrap_or(0);
-                    let rule_idx = match_rule_index(&walk_ruleset, &path, is_dir);
-                    child.client_state = (bytes, rule_idx);
-                }
-            });
-        });
-
     let mut items: Vec<Item> = Vec::new();
     let mut stack: Vec<DirFrame> = Vec::new();
 
-    for entry in walk.into_iter().flatten() {
+    for entry in fd_relative_walk(root, ruleset) {
         let depth = entry.depth;
-        let (bytes, rule_idx) = entry.client_state;
-        let is_dir = entry.file_type().is_dir();
+        let bytes = entry.bytes;
+        let rule_idx = entry.rule_idx;
+        let is_dir = entry.is_dir;
 
         // Strict depth-first order means every open frame at this depth or deeper
         // is now complete: pop and settle them (deepest first) before the entry.
@@ -185,7 +206,7 @@ pub fn run(root: &Path, ruleset: &Ruleset, min_unclassified: u64) -> Scan {
 
         if is_dir {
             stack.push(DirFrame {
-                path: entry.path(),
+                path: entry.path,
                 depth,
                 bytes,
                 rule_idx,
@@ -202,7 +223,7 @@ pub fn run(root: &Path, ruleset: &Ruleset, min_unclassified: u64) -> Scan {
             }
             if let Some(ri) = rule_idx {
                 if !covered {
-                    items.push(make_item(entry.path(), bytes, &ruleset.rules[ri]));
+                    items.push(make_item(entry.path, bytes, &ruleset.rules[ri]));
                     mark_match_below(&mut stack);
                 }
             }
@@ -217,13 +238,243 @@ pub fn run(root: &Path, ruleset: &Ruleset, min_unclassified: u64) -> Scan {
     }
 
     items.sort_by(|a, b| b.size_on_disk.cmp(&a.size_on_disk));
-    Scan { root: root.to_path_buf(), items }
+    Scan {
+        root: root.to_path_buf(),
+        items,
+    }
 }
 
-/// One open directory in the depth-first fold. jwalk yields entries in strict
-/// depth-first order, so at most one frame per live depth sits on the stack; a
-/// frame settles (is popped) the instant an entry at its depth or shallower
-/// arrives, or when the stream ends.
+/// A measured Item candidate in strict depth-first order. `path` is still needed
+/// for display and suffix Rules, but metadata and marker probes were resolved
+/// relative to open directory fds rather than by restatting this absolute path.
+#[derive(Clone)]
+struct WalkEntry {
+    path: PathBuf,
+    depth: usize,
+    is_dir: bool,
+    bytes: u64,
+    rule_idx: Option<usize>,
+}
+
+struct ChildEntry {
+    entry: WalkEntry,
+    name: CString,
+}
+
+fn fd_relative_walk(root: &Path, ruleset: &Ruleset) -> Vec<WalkEntry> {
+    let Some(root_stat) = lstat_path(root) else {
+        return Vec::new();
+    };
+
+    let is_dir = mode_is_dir(root_stat.st_mode);
+    let root_dir_fd = if is_dir { open_dir_path(root) } else { None };
+    let root_rule_idx = {
+        let probe = FdRuleProbe {
+            path: root,
+            parent_fd: None,
+            entry_name: None,
+            dir_fd: root_dir_fd.as_ref().map(AsRawFd::as_raw_fd),
+        };
+        match_rule_index_with_probe(ruleset, root, is_dir, &probe)
+    };
+
+    let mut entries = vec![WalkEntry {
+        path: root.to_path_buf(),
+        depth: 0,
+        is_dir,
+        bytes: stat_on_disk_bytes(&root_stat),
+        rule_idx: root_rule_idx,
+    }];
+
+    if let Some(dir_fd) = root_dir_fd {
+        entries.extend(walk_open_dir(root, 1, dir_fd, ruleset));
+    }
+
+    entries
+}
+
+fn walk_open_dir(
+    dir_path: &Path,
+    child_depth: usize,
+    dir_fd: OwnedFd,
+    ruleset: &Ruleset,
+) -> Vec<WalkEntry> {
+    let raw_fd = dir_fd.into_raw_fd();
+    let dir = unsafe { libc::fdopendir(raw_fd) };
+    if dir.is_null() {
+        unsafe {
+            libc::close(raw_fd);
+        }
+        return Vec::new();
+    }
+
+    let children = read_child_entries(dir, raw_fd, dir_path, child_depth, ruleset);
+    let entries = walk_child_entries(raw_fd, children, ruleset);
+    unsafe {
+        libc::closedir(dir);
+    }
+    entries
+}
+
+fn read_child_entries(
+    dir: *mut libc::DIR,
+    raw_fd: RawFd,
+    dir_path: &Path,
+    child_depth: usize,
+    ruleset: &Ruleset,
+) -> Vec<ChildEntry> {
+    let mut children = Vec::new();
+    loop {
+        let dirent = unsafe { libc::readdir(dir) };
+        if dirent.is_null() {
+            break;
+        }
+
+        let name = unsafe { CStr::from_ptr((*dirent).d_name.as_ptr()) };
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
+
+        let Some(stat) = fstatat_no_follow(raw_fd, name) else {
+            continue;
+        };
+
+        let is_dir = mode_is_dir(stat.st_mode);
+        let child_path = dir_path.join(OsString::from_vec(name.to_bytes().to_vec()));
+        let rule_idx = {
+            let probe = FdRuleProbe {
+                path: &child_path,
+                parent_fd: Some(raw_fd),
+                entry_name: Some(name),
+                dir_fd: None,
+            };
+            match_rule_index_with_probe(ruleset, &child_path, is_dir, &probe)
+        };
+
+        children.push(ChildEntry {
+            entry: WalkEntry {
+                path: child_path,
+                depth: child_depth,
+                is_dir,
+                bytes: stat_on_disk_bytes(&stat),
+                rule_idx,
+            },
+            name: name.to_owned(),
+        });
+    }
+
+    children
+}
+
+fn walk_child_entries(
+    parent_fd: RawFd,
+    children: Vec<ChildEntry>,
+    ruleset: &Ruleset,
+) -> Vec<WalkEntry> {
+    const CHILD_DIR_OPEN_BATCH: usize = 256;
+
+    let mut entries = Vec::new();
+    for chunk in children.chunks(CHILD_DIR_OPEN_BATCH) {
+        let work: Vec<(WalkEntry, Option<OwnedFd>)> = chunk
+            .iter()
+            .map(|child| {
+                let child_dir_fd = if child.entry.is_dir {
+                    open_dir_at(parent_fd, &child.name)
+                } else {
+                    None
+                };
+                (child.entry.clone(), child_dir_fd)
+            })
+            .collect();
+
+        let subtrees: Vec<Vec<WalkEntry>> = work
+            .into_par_iter()
+            .map(|(entry, child_dir_fd)| {
+                let child_path = entry.path.clone();
+                let grandchild_depth = entry.depth + 1;
+                let mut subtree = vec![entry];
+                if let Some(child_dir_fd) = child_dir_fd {
+                    subtree.extend(walk_open_dir(
+                        &child_path,
+                        grandchild_depth,
+                        child_dir_fd,
+                        ruleset,
+                    ));
+                }
+                subtree
+            })
+            .collect();
+
+        entries.extend(subtrees.into_iter().flatten());
+    }
+
+    entries
+}
+
+fn lstat_path(path: &Path) -> Option<libc::stat> {
+    let path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    fstatat_no_follow(libc::AT_FDCWD, &path)
+}
+
+fn fstatat_name_exists(dir_fd: RawFd, name: &str) -> bool {
+    CString::new(name.as_bytes())
+        .ok()
+        .and_then(|name| fstatat_no_follow(dir_fd, &name))
+        .is_some()
+}
+
+fn fstatat_child_name_exists(parent_fd: RawFd, entry_name: &CStr, child: &str) -> bool {
+    let mut relative = Vec::with_capacity(entry_name.to_bytes().len() + 1 + child.len());
+    relative.extend_from_slice(entry_name.to_bytes());
+    relative.push(b'/');
+    relative.extend_from_slice(child.as_bytes());
+
+    CString::new(relative)
+        .ok()
+        .and_then(|name| fstatat_no_follow(parent_fd, &name))
+        .is_some()
+}
+
+fn fstatat_no_follow(dir_fd: RawFd, name: &CStr) -> Option<libc::stat> {
+    let mut stat = MaybeUninit::<libc::stat>::uninit();
+    let rc = unsafe {
+        libc::fstatat(
+            dir_fd,
+            name.as_ptr(),
+            stat.as_mut_ptr(),
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    (rc == 0).then(|| unsafe { stat.assume_init() })
+}
+
+fn open_dir_path(path: &Path) -> Option<OwnedFd> {
+    let path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let fd = unsafe { libc::open(path.as_ptr(), open_dir_flags()) };
+    (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+fn open_dir_at(parent_fd: RawFd, name: &CStr) -> Option<OwnedFd> {
+    let fd = unsafe { libc::openat(parent_fd, name.as_ptr(), open_dir_flags()) };
+    (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+fn open_dir_flags() -> libc::c_int {
+    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW
+}
+
+fn mode_is_dir(mode: libc::mode_t) -> bool {
+    mode & libc::S_IFMT == libc::S_IFDIR
+}
+
+fn stat_on_disk_bytes(stat: &libc::stat) -> u64 {
+    on_disk_bytes_from_blocks(stat.st_blocks)
+}
+
+/// One open directory in the depth-first fold. The fd-relative walker yields
+/// entries in strict depth-first order, so at most one frame per live depth sits
+/// on the stack; a frame settles (is popped) the instant an entry at its depth
+/// or shallower arrives, or when the stream ends.
 struct DirFrame {
     path: PathBuf,
     depth: usize,
@@ -307,7 +558,9 @@ fn make_item(path: PathBuf, size_on_disk: u64, rule: &Rule) -> Item {
         size_on_disk,
         class: rule.class,
         recovery: recovery_for(rule),
-        evidence: Evidence { summary: rule.evidence.clone() },
+        evidence: Evidence {
+            summary: rule.evidence.clone(),
+        },
         override_reclaim: false,
         path,
     }
@@ -336,6 +589,36 @@ mod tests {
             .iter()
             .find(|i| i.path.file_name().and_then(|n| n.to_str()) == Some(name))
             .unwrap_or_else(|| panic!("no Item named {name} in scan"))
+    }
+
+    /// Issue #19: deep trees should be handled by the fd-relative Scan path
+    /// while preserving the Rule probes that need sibling and child markers.
+    #[test]
+    fn deep_tree_scan_matches_sibling_and_child_marker_rules() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        let mut deep = root.to_path_buf();
+        for i in 0..32 {
+            deep = deep.join(format!("{i:02x}"));
+            fs::create_dir(&deep).unwrap();
+        }
+
+        let project = deep.join("project");
+        let target = project.join("target");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(project.join("Cargo.toml"), b"[package]\n").unwrap();
+        fs::write(target.join("artifact"), vec![0u8; 4096]).unwrap();
+
+        let pgdata = deep.join("pgdata");
+        fs::create_dir(&pgdata).unwrap();
+        fs::write(pgdata.join("PG_VERSION"), b"16\n").unwrap();
+        fs::write(pgdata.join("relation"), vec![0u8; 4096]).unwrap();
+
+        let scan = run(root, &Ruleset::defaults(), 1024 * 1024 * 1024);
+
+        assert_eq!(item_for(&scan, "target").class, SafetyClass::Regenerable);
+        assert_eq!(item_for(&scan, "pgdata").class, SafetyClass::Irreplaceable);
     }
 
     /// Acceptance for issue #1: a Scan over a tree containing a VM image and a
@@ -421,11 +704,18 @@ mod tests {
     #[test]
     fn name_glob_rule_matches_by_wildcard() {
         let rs = Ruleset {
-            rules: vec![rule("zst-archives", Match::NameGlob { pattern: "*.zst".into() })],
+            rules: vec![rule(
+                "zst-archives",
+                Match::NameGlob {
+                    pattern: "*.zst".into(),
+                },
+            )],
         };
         // A single-file Item recognized by extension glob (issue #8 `*.zst` case).
         assert_eq!(
-            match_rule_typed(&rs, Path::new("/d/backup.tar.zst"), false).unwrap().name,
+            match_rule_typed(&rs, Path::new("/d/backup.tar.zst"), false)
+                .unwrap()
+                .name,
             "zst-archives",
         );
         assert!(match_rule_typed(&rs, Path::new("/d/backup.tar.gz"), false).is_none());
@@ -439,8 +729,12 @@ mod tests {
                 "guarded-build",
                 Match::All {
                     of: vec![
-                        Match::DirNamed { dir: "build".into() },
-                        Match::DirContainingFile { file: "marker".into() },
+                        Match::DirNamed {
+                            dir: "build".into(),
+                        },
+                        Match::DirContainingFile {
+                            file: "marker".into(),
+                        },
                     ],
                 },
             )],
@@ -455,7 +749,10 @@ mod tests {
 
         // Add the marker → both conditions hold.
         fs::write(build.join("marker"), b"x").unwrap();
-        assert_eq!(match_rule_typed(&rs, &build, true).unwrap().name, "guarded-build");
+        assert_eq!(
+            match_rule_typed(&rs, &build, true).unwrap().name,
+            "guarded-build"
+        );
     }
 
     #[test]
@@ -465,14 +762,28 @@ mod tests {
                 "zstd-either",
                 Match::Any {
                     of: vec![
-                        Match::NameGlob { pattern: "*.zst".into() },
-                        Match::NameGlob { pattern: "*.zstd".into() },
+                        Match::NameGlob {
+                            pattern: "*.zst".into(),
+                        },
+                        Match::NameGlob {
+                            pattern: "*.zstd".into(),
+                        },
                     ],
                 },
             )],
         };
-        assert_eq!(match_rule_typed(&rs, Path::new("/a.zst"), false).unwrap().name, "zstd-either");
-        assert_eq!(match_rule_typed(&rs, Path::new("/a.zstd"), false).unwrap().name, "zstd-either");
+        assert_eq!(
+            match_rule_typed(&rs, Path::new("/a.zst"), false)
+                .unwrap()
+                .name,
+            "zstd-either"
+        );
+        assert_eq!(
+            match_rule_typed(&rs, Path::new("/a.zstd"), false)
+                .unwrap()
+                .name,
+            "zstd-either"
+        );
         assert!(match_rule_typed(&rs, Path::new("/a.gz"), false).is_none());
     }
 

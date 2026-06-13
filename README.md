@@ -138,12 +138,12 @@ matches.Any.of = [
 ## Status
 
 The Scan → Classify → Reclaim pipeline is functional end-to-end, including
-post-classification Redundant Copy detection (`dedup.rs`: an on-disk-size
-pre-filter confirmed by blake3, run as a second pass over the Scan). The TUI
-offers an enriched navigable list, a toggleable on-disk-size overview pane (`t`),
-and the deliberate Confirm gate; the Ruleset supports a rich, composable set of
-match kinds (globs and AND/OR combinators). Every roadmap item named so far is
-implemented and covered by the test suite (`cargo test`).
+post-classification Redundant Copy detection (`dedup.rs`: non-Reclaimable Items
+are size-prefiltered and confirmed by blake3, run as a second pass over the Scan).
+The TUI offers an enriched navigable list, a toggleable on-disk-size overview pane
+(`t`), and the deliberate Confirm gate; the Ruleset supports a rich, composable
+set of match kinds (globs and AND/OR combinators). Every roadmap item named so far
+is implemented and covered by the test suite (`cargo test`).
 
 ## Disclaimer
 
