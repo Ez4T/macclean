@@ -91,6 +91,7 @@ terminal column (issue #7); the sorted-bar form is what stays readable.
 | `dedup.rs` | Post-classification Redundant Copy detection (size pre-filter + blake3) |
 | `reclaim.rs` | Hybrid clean + destination-by-class (ADR-0002, ADR-0004) |
 | `tui.rs` | Enriched navigable list, on-disk-size overview pane, and async Reclaim progress (ratatui) |
+| `update.rs` | Fail-soft update check via curl against `releases/latest` (ADR-0009) |
 
 ## Extending the ruleset
 
