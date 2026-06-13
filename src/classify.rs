@@ -502,7 +502,7 @@ struct DirFrame {
 /// single clean candidate handed up to its parent.
 fn finish_frame(
     frame: DirFrame,
-    stack: &mut Vec<DirFrame>,
+    stack: &mut [DirFrame],
     items: &mut Vec<Item>,
     ruleset: &Ruleset,
     min_unclassified: u64,

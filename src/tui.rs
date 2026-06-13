@@ -15,8 +15,12 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Frame;
-use std::path::PathBuf;
-use std::sync::mpsc::{self, TryRecvError};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{
+    mpsc::{self, TryRecvError},
+    Arc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -59,6 +63,47 @@ enum ConfirmTarget {
 enum Mode {
     Browse,
     Confirm { target: ConfirmTarget },
+    Reclaiming,
+}
+
+struct ReclaimJob {
+    rx: mpsc::Receiver<ReclaimMessage>,
+    stop_after_current: Arc<AtomicBool>,
+    progress: ReclaimProgress,
+    successful_indices: Vec<usize>,
+    last_success: Option<String>,
+}
+
+struct ReclaimProgress {
+    title: String,
+    target_label: String,
+    total: usize,
+    current_ordinal: usize,
+    completed: usize,
+    reclaimed_count: usize,
+    reclaimed_bytes: u64,
+    failed_count: usize,
+    first_error: Option<String>,
+    current_path: Option<PathBuf>,
+    current_action: String,
+    stop_requested: bool,
+    stopped: bool,
+}
+
+enum ReclaimMessage {
+    ItemStarted {
+        ordinal: usize,
+        path: PathBuf,
+        action: String,
+    },
+    ItemFinished {
+        index: usize,
+        bytes: u64,
+        result: std::result::Result<String, String>,
+    },
+    Finished {
+        stopped: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +122,7 @@ struct AppState {
     group_list: ListState,
     item_list: ListState,
     mode: Mode,
+    reclaim_job: Option<ReclaimJob>,
     status: String,
     /// Whether the proportional on-disk-usage overview pane is shown to the left
     /// of the action list (issue #7). Off by default; toggled with `t`.
@@ -94,6 +140,7 @@ impl AppState {
             group_list,
             item_list: ListState::default(),
             mode: Mode::Browse,
+            reclaim_job: None,
             status: "↑/↓ move · Enter open group · c Confirm group · t overview · q quit".into(),
             show_overview: false,
         }
@@ -259,8 +306,22 @@ fn loading_loop(
 }
 
 fn event_loop(terminal: &mut ratatui::DefaultTerminal, state: &mut AppState) -> Result<()> {
+    let mut tick = 0usize;
     loop {
-        terminal.draw(|f| draw(f, state))?;
+        drain_reclaim_messages(state);
+        terminal.draw(|f| draw(f, state, tick))?;
+        tick = tick.wrapping_add(1);
+
+        if matches!(state.mode, Mode::Reclaiming) {
+            if event::poll(Duration::from_millis(100))? {
+                if let Event::Key(key) = event::read()? {
+                    if key.kind == KeyEventKind::Press {
+                        handle_key(state, key.code);
+                    }
+                }
+            }
+            continue;
+        }
 
         if let Event::Key(key) = event::read()? {
             if key.kind != KeyEventKind::Press {
@@ -277,16 +338,25 @@ fn event_loop(terminal: &mut ratatui::DefaultTerminal, state: &mut AppState) -> 
 /// Split out from the event loop so the Confirm gate can be unit-tested without
 /// a live terminal.
 fn handle_key(state: &mut AppState, code: KeyCode) -> bool {
+    if matches!(state.mode, Mode::Reclaiming) {
+        match code {
+            KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Esc => {
+                request_stop_after_current(state)
+            }
+            _ => {}
+        }
+        return false;
+    }
+
     // In the Confirm modal, only `y` reclaims; anything else cancels untouched.
     if let Mode::Confirm { target } = state.mode {
         match code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => match target {
-                ConfirmTarget::Item { index } => do_reclaim_item(state, index),
-                ConfirmTarget::Group { class } => do_reclaim_group(state, class),
-            },
+            KeyCode::Char('y') | KeyCode::Char('Y') => start_reclaim_job(state, target),
             _ => state.status = "Reclaim cancelled. Nothing deleted.".into(),
         }
-        state.mode = Mode::Browse;
+        if !matches!(state.mode, Mode::Reclaiming) {
+            state.mode = Mode::Browse;
+        }
         return false;
     }
 
@@ -314,7 +384,7 @@ fn handle_key(state: &mut AppState, code: KeyCode) -> bool {
     false
 }
 
-fn draw_loading(f: &mut Frame, root: &PathBuf, elapsed: Duration, tick: usize) {
+fn draw_loading(f: &mut Frame, root: &Path, elapsed: Duration, tick: usize) {
     let [header, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
@@ -485,8 +555,268 @@ fn request_item_confirm(state: &mut AppState) {
     };
 }
 
-/// Second step of a Reclaim: actually delete the Item at `i`. Only ever reached
-/// from a `y` in the Confirm modal. Re-checks `may_reclaim` as the last guardrail.
+fn start_reclaim_job(state: &mut AppState, target: ConfirmTarget) {
+    let (items, title, target_label) = match target {
+        ConfirmTarget::Item { index } => {
+            let Some(item) = state.scan.items.get(index).cloned() else {
+                state.status = "Item is no longer available.".into();
+                return;
+            };
+            if !item.may_reclaim() {
+                state.status = format!(
+                    "{} is {}. Not reclaimable.",
+                    item.path.display(),
+                    item.class.label()
+                );
+                return;
+            }
+            (vec![(index, item)], "Reclaiming Item".into(), "Item".into())
+        }
+        ConfirmTarget::Group { class } => {
+            let items: Vec<(usize, Item)> = state
+                .scan
+                .items
+                .iter()
+                .cloned()
+                .enumerate()
+                .filter(|(_, item)| item.class == class && item.may_reclaim())
+                .collect();
+
+            if items.is_empty() {
+                state.status = format!("{} group has nothing reclaimable.", class.label());
+                return;
+            }
+
+            (
+                items,
+                format!("Reclaiming {} group", class.label()),
+                format!("{} Items", class.label()),
+            )
+        }
+    };
+
+    let total = items.len();
+    let ruleset = state.ruleset.clone();
+    let (tx, rx) = mpsc::channel();
+    let stop_after_current = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stop_after_current);
+
+    thread::spawn(move || run_reclaim_worker(items, ruleset, worker_stop, tx));
+
+    state.reclaim_job = Some(ReclaimJob {
+        rx,
+        stop_after_current,
+        progress: ReclaimProgress {
+            title,
+            target_label,
+            total,
+            current_ordinal: 0,
+            completed: 0,
+            reclaimed_count: 0,
+            reclaimed_bytes: 0,
+            failed_count: 0,
+            first_error: None,
+            current_path: None,
+            current_action: "Preparing Reclaim".into(),
+            stop_requested: false,
+            stopped: false,
+        },
+        successful_indices: Vec::new(),
+        last_success: None,
+    });
+    state.mode = Mode::Reclaiming;
+    state.status = "Reclaim running. Only stop-after-current is available.".into();
+}
+
+fn run_reclaim_worker(
+    items: Vec<(usize, Item)>,
+    ruleset: Ruleset,
+    stop_after_current: Arc<AtomicBool>,
+    tx: mpsc::Sender<ReclaimMessage>,
+) {
+    let mut stopped = false;
+
+    for (pos, (index, item)) in items.into_iter().enumerate() {
+        if pos > 0 && stop_after_current.load(Ordering::Relaxed) {
+            stopped = true;
+            break;
+        }
+
+        let action = reclaim::planned_action(&item, &ruleset);
+        if tx
+            .send(ReclaimMessage::ItemStarted {
+                ordinal: pos + 1,
+                path: item.path.clone(),
+                action,
+            })
+            .is_err()
+        {
+            return;
+        }
+
+        let bytes = item.size_on_disk;
+        let result = reclaim::reclaim(&item, &ruleset)
+            .map(reclaimed_label)
+            .map_err(|e| format!("{}: {e}", item.path.display()));
+
+        if tx
+            .send(ReclaimMessage::ItemFinished {
+                index,
+                bytes,
+                result,
+            })
+            .is_err()
+        {
+            return;
+        }
+    }
+
+    let _ = tx.send(ReclaimMessage::Finished { stopped });
+}
+
+fn reclaimed_label(done: Reclaimed) -> String {
+    match done {
+        Reclaimed::ToolClean { command } => format!("cleaned via `{command}`"),
+        Reclaimed::Removed => "removed".into(),
+        Reclaimed::Trashed => "moved to Trash".into(),
+    }
+}
+
+fn request_stop_after_current(state: &mut AppState) {
+    let Some(job) = state.reclaim_job.as_mut() else {
+        return;
+    };
+
+    if job.progress.total <= 1 {
+        state.status = "Current Item is already running; wait for completion.".into();
+        return;
+    }
+
+    job.stop_after_current.store(true, Ordering::Relaxed);
+    job.progress.stop_requested = true;
+    state.status =
+        "Stop requested. Current Item will finish; remaining Items will not start.".into();
+}
+
+fn drain_reclaim_messages(state: &mut AppState) {
+    let mut finished = false;
+
+    if let Some(job) = state.reclaim_job.as_mut() {
+        loop {
+            match job.rx.try_recv() {
+                Ok(ReclaimMessage::ItemStarted {
+                    ordinal,
+                    path,
+                    action,
+                }) => {
+                    job.progress.current_ordinal = ordinal;
+                    job.progress.current_path = Some(path);
+                    job.progress.current_action = action;
+                }
+                Ok(ReclaimMessage::ItemFinished {
+                    index,
+                    bytes,
+                    result,
+                }) => {
+                    job.progress.completed += 1;
+                    match result {
+                        Ok(how) => {
+                            job.progress.reclaimed_count += 1;
+                            job.progress.reclaimed_bytes += bytes;
+                            job.successful_indices.push(index);
+                            job.last_success = Some(how);
+                        }
+                        Err(error) => {
+                            job.progress.failed_count += 1;
+                            job.progress.first_error.get_or_insert(error);
+                        }
+                    }
+                }
+                Ok(ReclaimMessage::Finished { stopped }) => {
+                    job.progress.stopped = stopped;
+                    job.progress.current_path = None;
+                    job.progress.current_action = "Done".into();
+                    finished = true;
+                    break;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    job.progress
+                        .first_error
+                        .get_or_insert_with(|| "reclaim worker stopped".into());
+                    job.progress.failed_count += 1;
+                    finished = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if finished {
+        finish_reclaim_job(state);
+    }
+}
+
+fn finish_reclaim_job(state: &mut AppState) {
+    let Some(mut job) = state.reclaim_job.take() else {
+        return;
+    };
+
+    job.successful_indices.sort_unstable();
+    job.successful_indices.dedup();
+    for i in job.successful_indices.iter().rev() {
+        if *i < state.scan.items.len() {
+            state.scan.items.remove(*i);
+        }
+    }
+
+    state.status = reclaim_finished_status(&job.progress, job.last_success.as_deref());
+    state.mode = Mode::Browse;
+    sync_selection_after_items_changed(state);
+}
+
+fn reclaim_finished_status(progress: &ReclaimProgress, last_success: Option<&str>) -> String {
+    let reclaimed = human(progress.reclaimed_bytes);
+
+    if progress.stopped {
+        let untouched = progress.total.saturating_sub(progress.completed);
+        let mut status = format!(
+            "Stopped after current Item. Reclaimed {}/{} {}, {}. {} not touched.",
+            progress.reclaimed_count, progress.total, progress.target_label, reclaimed, untouched
+        );
+        if progress.failed_count > 0 {
+            if let Some(error) = &progress.first_error {
+                status.push_str(&format!(" First failure: {error}"));
+            }
+        }
+        return status;
+    }
+
+    if progress.failed_count > 0 {
+        let error = progress
+            .first_error
+            .as_deref()
+            .unwrap_or("unknown reclaim failure");
+        return format!(
+            "Reclaimed {}/{} {}, {}. First failure: {}",
+            progress.reclaimed_count, progress.total, progress.target_label, reclaimed, error
+        );
+    }
+
+    if progress.total == 1 {
+        let how = last_success.unwrap_or("completed");
+        return format!("Reclaimed {reclaimed} ({how}).");
+    }
+
+    format!(
+        "Reclaimed {} {}, {}.",
+        progress.reclaimed_count, progress.target_label, reclaimed
+    )
+}
+
+/// Direct single-Item Reclaim path used by selection edge-case tests. The live
+/// TUI starts a worker with [`start_reclaim_job`] after Confirm.
+#[cfg(test)]
 fn do_reclaim_item(state: &mut AppState, i: usize) {
     let Some(item) = state.scan.items.get(i).cloned() else {
         return;
@@ -501,11 +831,7 @@ fn do_reclaim_item(state: &mut AppState, i: usize) {
     }
     match reclaim::reclaim(&item, &state.ruleset) {
         Ok(done) => {
-            let how = match done {
-                Reclaimed::ToolClean { command } => format!("cleaned via `{command}`"),
-                Reclaimed::Removed => "removed".into(),
-                Reclaimed::Trashed => "moved to Trash".into(),
-            };
+            let how = reclaimed_label(done);
             state.status = format!("Reclaimed {} ({how}).", human(item.size_on_disk));
             state.scan.items.remove(i);
             sync_selection_after_items_changed(state);
@@ -514,62 +840,7 @@ fn do_reclaim_item(state: &mut AppState, i: usize) {
     }
 }
 
-fn do_reclaim_group(state: &mut AppState, class: SafetyClass) {
-    let indices: Vec<usize> = state
-        .scan
-        .items
-        .iter()
-        .enumerate()
-        .filter_map(|(i, item)| (item.class == class && item.may_reclaim()).then_some(i))
-        .collect();
-
-    if indices.is_empty() {
-        state.status = format!("{} group has nothing reclaimable.", class.label());
-        return;
-    }
-
-    let attempted = indices.len();
-    let mut reclaimed_count = 0usize;
-    let mut reclaimed_bytes = 0u64;
-    let mut first_error: Option<String> = None;
-
-    for i in indices.into_iter().rev() {
-        let Some(item) = state.scan.items.get(i).cloned() else {
-            continue;
-        };
-        match reclaim::reclaim(&item, &state.ruleset) {
-            Ok(_) => {
-                reclaimed_count += 1;
-                reclaimed_bytes += item.size_on_disk;
-                state.scan.items.remove(i);
-            }
-            Err(e) => {
-                first_error.get_or_insert_with(|| format!("{}: {e}", item.path.display()));
-            }
-        }
-    }
-
-    sync_selection_after_items_changed(state);
-    if let Some(error) = first_error {
-        state.status = format!(
-            "Reclaimed {}/{} {} Items, {}. First failure: {}",
-            reclaimed_count,
-            attempted,
-            class.label(),
-            human(reclaimed_bytes),
-            error
-        );
-    } else {
-        state.status = format!(
-            "Reclaimed {} {} Items, {}.",
-            reclaimed_count,
-            class.label(),
-            human(reclaimed_bytes)
-        );
-    }
-}
-
-fn draw(f: &mut Frame, state: &AppState) {
+fn draw(f: &mut Frame, state: &AppState, tick: usize) {
     let [header, body, detail, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
@@ -619,6 +890,10 @@ fn draw(f: &mut Frame, state: &AppState) {
     // The Confirm modal overlays everything while pending (CONTEXT.md → "Confirm").
     if let Mode::Confirm { target } = state.mode {
         draw_confirm(f, state, target);
+    }
+
+    if matches!(state.mode, Mode::Reclaiming) {
+        draw_reclaiming(f, state, tick);
     }
 }
 
@@ -927,7 +1202,7 @@ fn draw_item_confirm(f: &mut Frame, item: &Item) {
 /// Class, how many currently reclaimable Items will be affected, and the total
 /// bytes. Protected and un-overridden Unclassified Items never reach this modal.
 fn draw_group_confirm(f: &mut Frame, group: GroupSummary) {
-    let area = centered_rect(64, 10, f.area());
+    let area = centered_rect(64, 12, f.area());
     f.render_widget(Clear, area);
 
     let mut lines = vec![
@@ -966,6 +1241,8 @@ fn draw_group_confirm(f: &mut Frame, group: GroupSummary) {
                 Style::default().fg(Color::Gray),
             ),
         ]),
+        Line::from("  After Confirm, reclaim runs one Item at a time."),
+        Line::from("  You can stop before the next Item while it runs."),
     ];
 
     if group.class == SafetyClass::Unclassified {
@@ -994,6 +1271,82 @@ fn draw_group_confirm(f: &mut Frame, group: GroupSummary) {
     );
 }
 
+fn draw_reclaiming(f: &mut Frame, state: &AppState, tick: usize) {
+    let Some(job) = &state.reclaim_job else {
+        return;
+    };
+    let progress = &job.progress;
+    let area = centered_rect(72, 8, f.area());
+    f.render_widget(Clear, area);
+
+    let frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let spinner = frames[tick % frames.len()];
+    let current_path = progress
+        .current_path
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "Preparing next Item".into());
+
+    let lines = if progress.total > 1 {
+        let ordinal = progress.current_ordinal.max(progress.completed);
+        vec![
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(spinner, Style::default().fg(Color::Yellow).bold()),
+                Span::raw(" "),
+                Span::raw(progress.title.clone()).bold(),
+            ]),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    format!("{ordinal}/{} Items", progress.total),
+                    Style::default().bold(),
+                ),
+                Span::raw(format!(" · {} reclaimed", human(progress.reclaimed_bytes))),
+            ]),
+            Line::from(vec![Span::raw("  Now: "), Span::raw(current_path)]),
+            Line::from(if progress.stop_requested {
+                vec![
+                    Span::raw("  "),
+                    Span::styled("Stop requested", Style::default().fg(Color::Yellow).bold()),
+                    Span::raw(" · current Item will finish"),
+                ]
+            } else {
+                vec![
+                    Span::raw("  "),
+                    Span::styled("[s/Esc]", Style::default().fg(Color::Yellow).bold()),
+                    Span::raw(" stop after current Item"),
+                ]
+            }),
+        ]
+    } else {
+        vec![
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(spinner, Style::default().fg(Color::Yellow).bold()),
+                Span::raw(" "),
+                Span::raw(progress.title.clone()).bold(),
+            ]),
+            Line::from(vec![Span::raw("  "), Span::raw(current_path)]),
+            Line::from(vec![
+                Span::raw("  "),
+                Span::raw(progress.current_action.clone()),
+            ]),
+            Line::from("  This may take a while"),
+        ]
+    };
+
+    f.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Reclaiming ")
+                .border_style(Style::default().fg(Color::Yellow)),
+        ),
+        area,
+    );
+}
+
 /// A horizontally-centered rectangle `percent_x` wide and `height` tall, clamped
 /// to `area`. Used to float the Confirm modal over the list. The width math is
 /// done in `u32` so a wide terminal (`area.width * percent_x > u16::MAX`, i.e.
@@ -1014,6 +1367,7 @@ fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
 mod tests {
     use super::*;
     use crate::model::{Evidence, RecoveryMethod};
+    use crate::ruleset::{Match, Rule};
     use std::fs;
     use std::path::PathBuf;
 
@@ -1083,12 +1437,71 @@ mod tests {
         }
     }
 
+    fn slow_regenerable_item(path: PathBuf) -> Item {
+        Item {
+            path,
+            size_on_disk: 4096,
+            class: SafetyClass::Regenerable,
+            recovery: RecoveryMethod::Rebuild {
+                command: "make".into(),
+            },
+            evidence: Evidence {
+                summary: "fixture build output".into(),
+            },
+            override_reclaim: false,
+        }
+    }
+
+    fn slow_ruleset() -> Ruleset {
+        Ruleset {
+            rules: vec![Rule {
+                name: "slow-buildcache".into(),
+                matches: Match::DirNamed {
+                    dir: "buildcache".into(),
+                },
+                class: SafetyClass::Regenerable,
+                clean_command: Some("sleep 0.2".into()),
+                recover_command: Some("make".into()),
+                evidence: "fixture build output".into(),
+            }],
+        }
+    }
+
     fn select_group(state: &mut AppState, class: SafetyClass) {
         let idx = group_summaries(&state.scan)
             .iter()
             .position(|group| group.class == class)
             .expect("group exists");
         state.group_list.select(Some(idx));
+    }
+
+    fn wait_for_reclaim(state: &mut AppState) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while matches!(state.mode, Mode::Reclaiming) && Instant::now() < deadline {
+            drain_reclaim_messages(state);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drain_reclaim_messages(state);
+        assert!(
+            !matches!(state.mode, Mode::Reclaiming),
+            "reclaim worker did not finish"
+        );
+    }
+
+    fn wait_until_reclaim_current_ordinal(state: &mut AppState, ordinal: usize) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline {
+            drain_reclaim_messages(state);
+            if state
+                .reclaim_job
+                .as_ref()
+                .is_some_and(|job| job.progress.current_ordinal == ordinal)
+            {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("reclaim worker did not reach item {ordinal}");
     }
 
     #[test]
@@ -1230,6 +1643,9 @@ mod tests {
         handle_key(&mut state, KeyCode::Char('c'));
         handle_key(&mut state, KeyCode::Char('y'));
 
+        assert!(matches!(state.mode, Mode::Reclaiming));
+        wait_for_reclaim(&mut state);
+
         assert!(matches!(state.mode, Mode::Browse));
         assert!(!nm1.exists(), "the y confirm reclaims the first group Item");
         assert!(
@@ -1238,6 +1654,37 @@ mod tests {
         );
         assert!(cache.exists(), "other groups are left alone");
         assert_eq!(state.scan.items.len(), 1);
+    }
+
+    /// A running group Reclaim is locked, but the user can request that no next
+    /// Item starts. The current Item is allowed to finish because mid-delete
+    /// cancellation cannot promise a rollback.
+    #[test]
+    fn stop_after_current_leaves_remaining_group_items_untouched() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = tmp.path().join("one").join("buildcache");
+        let second = tmp.path().join("two").join("buildcache");
+        fs::create_dir_all(&first).unwrap();
+        fs::create_dir_all(&second).unwrap();
+
+        let mut state = state_with(vec![
+            slow_regenerable_item(first),
+            slow_regenerable_item(second),
+        ]);
+        state.ruleset = slow_ruleset();
+
+        select_group(&mut state, SafetyClass::Regenerable);
+        handle_key(&mut state, KeyCode::Char('c'));
+        handle_key(&mut state, KeyCode::Char('y'));
+        wait_until_reclaim_current_ordinal(&mut state, 1);
+
+        handle_key(&mut state, KeyCode::Char('s'));
+        wait_for_reclaim(&mut state);
+
+        assert!(matches!(state.mode, Mode::Browse));
+        assert_eq!(state.scan.items.len(), 1, "one Item was not touched");
+        assert!(state.status.contains("Stopped after current Item"));
+        assert!(state.status.contains("1 not touched"));
     }
 
     /// A Protected (Irreplaceable) Item never opens the Confirm modal — the

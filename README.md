@@ -45,7 +45,8 @@ The TUI opens immediately with a scan screen while filesystem sizing runs in the
 background.
 
 In the TUI: `↑/↓` move · `o` override an Unclassified item · `t` toggle the
-on-disk-size overview pane · `c` Confirm reclaim · `q` quit.
+on-disk-size overview pane · `c` Confirm reclaim · `q` quit. While a group
+Reclaim is running, `s` or `Esc` stops before the next Item starts.
 
 ## From source
 
@@ -87,7 +88,7 @@ terminal column (issue #7); the sorted-bar form is what stays readable.
 | `classify.rs` | Applies the ruleset; fail-safe to `Unclassified` (ADR-0001) |
 | `dedup.rs` | Post-classification Redundant Copy detection (size pre-filter + blake3) |
 | `reclaim.rs` | Hybrid clean + destination-by-class (ADR-0002, ADR-0004) |
-| `tui.rs` | Enriched navigable list + on-disk-size overview pane (ratatui) |
+| `tui.rs` | Enriched navigable list, on-disk-size overview pane, and async Reclaim progress (ratatui) |
 
 ## Extending the ruleset
 
