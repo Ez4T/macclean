@@ -9,6 +9,7 @@ mod reclaim;
 mod ruleset;
 mod scan;
 mod tui;
+mod update;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -31,6 +32,11 @@ struct Cli {
     /// Unclassified items.
     #[arg(long, global = true, default_value_t = 200)]
     min_unclassified_mb: u64,
+
+    /// Check GitHub for a newer release and report how to upgrade, then exit.
+    /// Fails soft: prints a brief note and exits 0 if the check can't complete.
+    #[arg(long)]
+    check_update: bool,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -80,6 +86,14 @@ fn run_scan(root: &Path, ruleset: &Ruleset, min: u64) -> model::Scan {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // --check-update short-circuits before any Scan setup: it needs no root or
+    // ruleset, and a failed check is informational, never an error (issue #31).
+    if cli.check_update {
+        update::print_check_update();
+        return Ok(());
+    }
+
     let root = resolve_root(&cli)?;
     let ruleset = load_ruleset();
     let min = cli.min_unclassified_mb * 1024 * 1024;
