@@ -1,0 +1,50 @@
+name: release
+
+# Push a tag like `v0.1.0` to build the universal binary and publish a Release.
+#   git tag v0.1.0 && git push --tags
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write  # create the Release and upload assets
+
+jobs:
+  release:
+    runs-on: macos-latest  # Apple Silicon; builds arm64 natively, cross-builds x86_64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Add x86_64 target
+        run: rustup target add x86_64-apple-darwin
+
+      - name: Build aarch64
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Build x86_64
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Combine into universal binary
+        run: |
+          lipo -create \
+            target/aarch64-apple-darwin/release/macclean \
+            target/x86_64-apple-darwin/release/macclean \
+            -output macclean-macos
+          lipo -info macclean-macos
+          shasum -a 256 macclean-macos > macclean-macos.sha256
+
+      - name: Smoke-test the universal binary
+        run: |
+          chmod +x macclean-macos
+          ./macclean-macos --version
+          ./macclean-macos scan --help
+
+      - name: Create Release and upload assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            macclean-macos macclean-macos.sha256

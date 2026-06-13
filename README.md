@@ -8,23 +8,51 @@ Confirm.
 See [`CONTEXT.md`](./CONTEXT.md) for the vocabulary and [`docs/adr/`](./docs/adr)
 for the decisions behind the design.
 
-## Build & run
+## Install
+
+No Rust, no Homebrew, no sudo — one line on any Mac:
 
 ```sh
-cargo build --release
+curl -fsSL https://ez4t.github.io/macclean/install.sh | sh
+```
 
+This installs a single universal binary to `~/.local/bin` and adds it to your
+`PATH` (restart your shell or run `exec zsh` afterward). The binary is unsigned
+but installs without a Gatekeeper prompt — see
+[`docs/adr/0007`](./docs/adr/0007-public-install-via-curl-sh.md) for why.
+
+## Run
+
+```sh
 # Launch the TUI over $HOME (default root)
-./target/release/macclean
+macclean
 
 # Non-interactive: print the classified scan
-./target/release/macclean scan --root ~/Documents --min-unclassified-mb 200
+macclean scan --root ~/Documents --min-unclassified-mb 200
 
 # Whole disk (may need elevated access)
-./target/release/macclean --full-disk
+macclean --full-disk
 ```
+
+The TUI opens immediately with a scan screen while filesystem sizing runs in the
+background.
 
 In the TUI: `↑/↓` move · `o` override an Unclassified item · `t` toggle the
 on-disk-size overview pane · `c` Confirm reclaim · `q` quit.
+
+## From source
+
+```sh
+cargo build --release
+./target/release/macclean
+```
+
+## Uninstall
+
+```sh
+rm ~/.local/bin/macclean
+# then remove the `export PATH="$HOME/.local/bin:$PATH"` line the installer added to ~/.zshrc
+```
 
 The overview pane (`t`) shows a proportional bar per Item — a 1-D "block treemap"
 scaled so the largest on-disk Item fills the column, colour-coded by Safety Class.
