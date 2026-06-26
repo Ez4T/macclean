@@ -19,9 +19,9 @@ _Avoid_: entry, node, target, candidate
 
 **Safety Class**:
 The label assigned to each **Item** describing what it is and the cost of
-deleting it. Exactly six values. The first four are **Reclaimable** (the app may
-offer them). Irreplaceable is **Protected**. Unclassified is surfaced but never
-auto-offered.
+deleting it. Exactly seven values. The first four are **Reclaimable** (the app
+may offer them). Irreplaceable is **Protected**. Unclassified and BrowserCache
+are surfaced but never auto-offered — both require an explicit override.
 
 - **Regenerable** — build output that a build command recreates (e.g. `cargo
   clean` then `cargo build`, `flutter clean` then rebuild). Recovered by
@@ -30,7 +30,11 @@ auto-offered.
   `node_modules` via `npm install`). Recovered by *reinstalling*. Kept distinct
   from Regenerable because the recovery action differs.
 - **Cache** — data automatically refilled on next use, with no command needed
-  (e.g. `~/.npm`, `~/.cache/uv`, browser caches). Recovered by *doing nothing*.
+  (e.g. `~/.npm`, `~/.cache/uv`). Recovered by *doing nothing*.
+- **BrowserCache** — a browser's on-disk cache (Safari, Chrome, Firefox, Arc,
+  Brave, Edge). Browsers rebuild it on next use, but clearing it has a real
+  perceived cost (slow page loads, video rebuffering). Not offered for Reclaim
+  by default; the user must explicitly override each Item first.
 - **Redundant Copy** — a byte-identical duplicate of data that exists elsewhere;
   deleting it loses nothing because the original survives (e.g. a `-backup`
   tree, a `.zst` of an existing image). Recovered by *the surviving copy*.

@@ -30,16 +30,18 @@ fn class_color(class: SafetyClass) -> Color {
         SafetyClass::Regenerable => Color::Green,
         SafetyClass::Reinstallable => Color::Cyan,
         SafetyClass::Cache => Color::Blue,
+        SafetyClass::BrowserCache => Color::Rgb(255, 165, 0),
         SafetyClass::RedundantCopy => Color::Magenta,
         SafetyClass::Irreplaceable => Color::Red,
         SafetyClass::Unclassified => Color::Yellow,
     }
 }
 
-const CLASS_ORDER: [SafetyClass; 6] = [
+const CLASS_ORDER: [SafetyClass; 7] = [
     SafetyClass::Regenerable,
     SafetyClass::Reinstallable,
     SafetyClass::Cache,
+    SafetyClass::BrowserCache,
     SafetyClass::RedundantCopy,
     SafetyClass::Unclassified,
     SafetyClass::Irreplaceable,
@@ -267,6 +269,9 @@ fn class_recovery_hint(class: SafetyClass) -> &'static str {
         SafetyClass::Regenerable => "Recovery: rebuild after Reclaim",
         SafetyClass::Reinstallable => "Recovery: reinstall dependencies after Reclaim",
         SafetyClass::Cache => "Recovery: cache refills automatically",
+        SafetyClass::BrowserCache => {
+            "Override required; cache refills automatically on next browser use"
+        }
         SafetyClass::RedundantCopy => "Recovery: the surviving copy remains",
         SafetyClass::Unclassified => "Open group and override individual Items before Reclaim",
         SafetyClass::Irreplaceable => "Protected: not offered for Reclaim",
@@ -797,7 +802,7 @@ fn back_to_groups(state: &mut AppState) {
 
 fn toggle_override(state: &mut AppState) {
     let Some(i) = selected_item_index(state) else {
-        state.status = "Open Unclassified to override individual Items.".into();
+        state.status = "Open Unclassified or Browser Cache to override individual Items.".into();
         return;
     };
     let item = &mut state.scan.items[i];
@@ -806,6 +811,17 @@ fn toggle_override(state: &mut AppState) {
         state.status = if item.override_reclaim {
             format!(
                 "Overridden → will Trash on Confirm: {}",
+                item.path.display()
+            )
+        } else {
+            "Override cleared.".into()
+        };
+        sync_selection_after_items_changed(state);
+    } else if item.class == SafetyClass::BrowserCache {
+        item.override_reclaim = !item.override_reclaim;
+        state.status = if item.override_reclaim {
+            format!(
+                "Overridden → Browser Cache Reclaimable on Confirm: {}",
                 item.path.display()
             )
         } else {
@@ -855,6 +871,10 @@ fn request_group_confirm(state: &mut AppState) {
                 "Unclassified is not offered. Open the group and press o on Items to override."
                     .into()
             }
+            SafetyClass::BrowserCache => {
+                "Browser Cache is not offered. Open the group and press o on Items to override."
+                    .into()
+            }
             SafetyClass::Irreplaceable => "Irreplaceable is Protected. Not reclaimable.".into(),
             _ => format!("{} group has nothing reclaimable.", group.class.label()),
         };
@@ -874,6 +894,11 @@ fn request_item_confirm(state: &mut AppState) {
         state.status = if item.class == SafetyClass::Unclassified {
             format!(
                 "{} is Unclassified. Press o to override before Reclaim.",
+                item.path.display()
+            )
+        } else if item.class == SafetyClass::BrowserCache {
+            format!(
+                "{} is Browser Cache. Press o to override before Reclaim.",
                 item.path.display()
             )
         } else {
@@ -1013,10 +1038,16 @@ fn toggle_item_selection(state: &mut AppState) {
     let item = &state.scan.items[i];
     if !item.may_reclaim() {
         // Selection and override are separate deliberate steps (issue #26): ticking
-        // an un-overridden Unclassified Item is a no-op that points at `o` first.
+        // an un-overridden Unclassified or BrowserCache Item is a no-op that points
+        // at `o` first.
         state.status = if item.class == SafetyClass::Unclassified {
             format!(
                 "{} is Unclassified. Press o to override before selecting.",
+                item.path.display()
+            )
+        } else if item.class == SafetyClass::BrowserCache {
+            format!(
+                "{} is Browser Cache. Press o to override before selecting.",
                 item.path.display()
             )
         } else {
@@ -1045,6 +1076,10 @@ fn toggle_group_selection(state: &mut AppState) {
             state.status = match class {
                 SafetyClass::Unclassified => {
                     "Unclassified has nothing reclaimable. Open it and press o to override Items."
+                        .into()
+                }
+                SafetyClass::BrowserCache => {
+                    "Browser Cache has nothing reclaimable. Open it and press o to override Items."
                         .into()
                 }
                 SafetyClass::Irreplaceable => {
@@ -1564,7 +1599,9 @@ fn draw_group_list(f: &mut Frame, state: &AppState, area: Rect) {
                     "Protected".to_string(),
                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 )
-            } else if group.class == SafetyClass::Unclassified {
+            } else if group.class == SafetyClass::Unclassified
+                || group.class == SafetyClass::BrowserCache
+            {
                 Span::styled(
                     "needs override".to_string(),
                     Style::default().fg(Color::Yellow),
@@ -1810,7 +1847,7 @@ fn draw_selection_confirm(f: &mut Frame, state: &AppState) {
     let total_bytes: u64 = breakdown.iter().map(|(_, _, bytes)| bytes).sum();
     let has_unclassified = breakdown
         .iter()
-        .any(|(class, _, _)| *class == SafetyClass::Unclassified);
+        .any(|(class, _, _)| matches!(class, SafetyClass::Unclassified | SafetyClass::BrowserCache));
 
     let mut lines = vec![
         Line::from(""),
@@ -1856,7 +1893,7 @@ fn draw_selection_confirm(f: &mut Frame, state: &AppState) {
     ));
     if has_unclassified {
         lines.push(Line::from(
-            "  Only overridden Unclassified Items are included.",
+            "  Only overridden Unclassified/Browser Cache Items are included.",
         ));
     }
     lines.push(Line::from(""));
@@ -1984,6 +2021,9 @@ fn draw_group_confirm(f: &mut Frame, group: GroupSummary) {
 
     if group.class == SafetyClass::Unclassified {
         lines.push(Line::from("  Only overridden Items move to Trash."));
+    }
+    if group.class == SafetyClass::BrowserCache {
+        lines.push(Line::from("  Only overridden Items are Reclaimable."));
     }
 
     lines.extend([
