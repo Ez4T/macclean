@@ -23,6 +23,12 @@ No Rust, no Homebrew, no sudo — one line on any Mac:
 curl -fsSL https://macclean.commaco.tech/install.sh | sh
 ```
 
+If that returns a 404 (rare; can happen during a DNS change), use the raw fallback:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Ez4T/macclean/main/docs/install.sh | sh
+```
+
 This installs a single universal binary to `~/.local/bin` and adds it to your
 `PATH` (restart your shell or run `exec zsh` afterward). The binary is unsigned
 but installs without a Gatekeeper prompt — see
