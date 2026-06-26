@@ -20,7 +20,7 @@ for the decisions behind the design.
 No Rust, no Homebrew, no sudo — one line on any Mac:
 
 ```sh
-curl -fsSL https://ez4t.github.io/macclean/install.sh | sh
+curl -fsSL https://macclean.commaco.tech/install.sh | sh
 ```
 
 This installs a single universal binary to `~/.local/bin` and adds it to your

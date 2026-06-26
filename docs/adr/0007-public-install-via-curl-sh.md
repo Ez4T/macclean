@@ -5,7 +5,7 @@ by a `curl | sh` installer, with no prerequisites — no Rust toolchain, no Home
 no sudo, and no Apple Developer account. A tag push (`v*`) triggers GitHub Actions
 to build `aarch64` and `x86_64`, `lipo`-combine them into one `macclean-macos`
 asset, and publish it to a GitHub Release; `docs/install.sh` (served from GitHub
-Pages at `ez4t.github.io/macclean/install.sh`) downloads the asset from the
+Pages at `macclean.commaco.tech/install.sh`) downloads the asset from the
 `releases/latest/download/` redirect, verifies its sha256, and installs it to
 `~/.local/bin`, adding that dir to `PATH` via `~/.zshrc` when needed.
 

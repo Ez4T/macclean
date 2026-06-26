@@ -1,0 +1,789 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>macclean - classify disk usage before you reclaim it</title>
+  <meta name="description" content="macclean is a local macOS TUI that surfaces disk usage, labels each Item by Safety Class, shows Evidence, and Reclaims only after explicit Confirm.">
+  <meta property="og:title" content="macclean">
+  <meta property="og:description" content="Classify disk usage by recoverability before you Reclaim it.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://macclean.commaco.tech/">
+  <meta property="og:image" content="https://macclean.commaco.tech/assets/macclean-tui.png">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: oklch(0.075 0 0);
+      --bg-soft: oklch(0.105 0.008 120);
+      --surface: oklch(0.135 0.012 120);
+      --surface-2: oklch(0.18 0.014 120);
+      --surface-3: oklch(0.22 0.016 120);
+      --line: oklch(0.31 0.012 120);
+      --line-soft: oklch(0.24 0.01 120);
+      --ink: oklch(0.94 0.004 120);
+      --muted: oklch(0.72 0.012 120);
+      --muted-2: oklch(0.60 0.012 120);
+      --primary: oklch(0.76 0.14 154);
+      --primary-ink: oklch(0.08 0 0);
+      --accent: oklch(0.79 0.13 76);
+      --danger: oklch(0.68 0.17 28);
+      --warn: oklch(0.86 0.16 96);
+      --cyan: oklch(0.74 0.12 210);
+      --violet: oklch(0.74 0.13 305);
+      --green: oklch(0.78 0.15 145);
+      --max: 1180px;
+      --radius: 10px;
+      --shadow: 0 8px 0 oklch(0.02 0 0 / 0.35);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+      background: var(--bg);
+    }
+
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 18% 8%, oklch(0.24 0.045 150 / 0.5), transparent 34rem),
+        linear-gradient(180deg, oklch(0.09 0.004 120), var(--bg) 36rem);
+      color: var(--ink);
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 16px;
+      line-height: 1.6;
+      text-rendering: optimizeLegibility;
+      -webkit-font-smoothing: antialiased;
+      overflow-x: clip;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0 0 auto;
+      height: 3px;
+      background: linear-gradient(90deg, var(--primary), var(--accent), var(--danger));
+      z-index: 10;
+    }
+
+    a {
+      color: inherit;
+      text-decoration-color: oklch(0.76 0.14 154 / 0.5);
+      text-underline-offset: 0.18em;
+    }
+
+    a:hover {
+      text-decoration-color: var(--primary);
+    }
+
+    img {
+      max-width: 100%;
+      height: auto;
+      display: block;
+    }
+
+    figure {
+      margin: 0;
+    }
+
+    code,
+    pre,
+    .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    }
+
+    .wrap {
+      width: 100%;
+      max-width: calc(var(--max) + 40px);
+      margin: 0 auto;
+      padding-inline: 20px;
+    }
+
+    .site-header {
+      position: sticky;
+      top: 3px;
+      z-index: 9;
+      border-bottom: 1px solid oklch(0.31 0.012 120 / 0.5);
+      background: oklch(0.075 0 0 / 0.86);
+      backdrop-filter: blur(14px);
+    }
+
+    .nav {
+      min-height: 62px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 780;
+      letter-spacing: -0.02em;
+      text-decoration: none;
+    }
+
+    .brand-mark {
+      width: 18px;
+      height: 18px;
+      border: 1px solid var(--primary);
+      border-radius: 4px;
+      background: linear-gradient(135deg, var(--primary), oklch(0.46 0.08 154));
+      box-shadow: inset 0 0 0 4px var(--bg);
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 22px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .nav-links a {
+      text-decoration: none;
+    }
+
+    .nav-links a:hover {
+      color: var(--ink);
+    }
+
+    .hero {
+      padding: clamp(58px, 9vw, 116px) 0 70px;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 0.9fr) minmax(420px, 1.1fr);
+      gap: clamp(32px, 5vw, 68px);
+      align-items: center;
+    }
+
+    .hero-grid > *,
+    .section-head > *,
+    .split > * {
+      min-width: 0;
+    }
+
+    .version {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 6px 10px;
+      color: var(--muted);
+      background: var(--bg-soft);
+      font-size: 13px;
+    }
+
+    .version::before {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--primary);
+    }
+
+    h1,
+    h2,
+    h3 {
+      margin: 0;
+      line-height: 1.05;
+      text-wrap: balance;
+      letter-spacing: -0.035em;
+    }
+
+    h1 {
+      max-width: 12ch;
+      margin-top: 22px;
+      font-size: clamp(3.4rem, 8vw, 5.8rem);
+    }
+
+    .lede {
+      max-width: 62ch;
+      margin: 24px 0 0;
+      color: var(--muted);
+      font-size: 1.125rem;
+      text-wrap: pretty;
+    }
+
+    .actions {
+      margin-top: 32px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .button,
+    .copy-command {
+      min-height: 44px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      border-radius: 999px;
+      padding: 10px 16px;
+      font-weight: 700;
+      text-decoration: none;
+      cursor: pointer;
+    }
+
+    .button {
+      border: 1px solid var(--primary);
+      background: var(--primary);
+      color: var(--primary-ink);
+    }
+
+    .button:hover,
+    .button:focus-visible {
+      background: oklch(0.82 0.14 154);
+    }
+
+    .copy-command {
+      width: fit-content;
+      max-width: 100%;
+      min-width: 0;
+      border: 1px solid var(--line);
+      color: var(--ink);
+      background: var(--surface);
+      font-size: 14px;
+    }
+
+    .copy-command code {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .microfacts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 24px;
+      padding: 0;
+      list-style: none;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .microfacts li {
+      border: 1px solid var(--line-soft);
+      border-radius: 999px;
+      padding: 6px 10px;
+      background: oklch(0.10 0.006 120 / 0.72);
+    }
+
+    .hero-media {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 8px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    .warning {
+      margin-top: 18px;
+      border: 1px solid oklch(0.68 0.17 28 / 0.55);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      color: oklch(0.84 0.09 46);
+      background: oklch(0.15 0.045 32 / 0.62);
+      font-size: 14px;
+    }
+
+    section {
+      padding: 76px 0;
+    }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: minmax(0, 0.72fr) minmax(280px, 0.5fr);
+      gap: 28px;
+      align-items: end;
+      margin-bottom: 28px;
+    }
+
+    h2 {
+      font-size: clamp(2rem, 4vw, 3.5rem);
+    }
+
+    .section-head p,
+    .section-copy {
+      margin: 0;
+      color: var(--muted);
+      text-wrap: pretty;
+    }
+
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 1px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
+      background: var(--line);
+    }
+
+    .flow-step {
+      padding: 24px;
+      background: var(--surface);
+    }
+
+    .flow-step .mono {
+      color: var(--primary);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .flow-step h3 {
+      margin-top: 14px;
+      font-size: 1.25rem;
+      letter-spacing: -0.02em;
+    }
+
+    .flow-step p {
+      margin: 10px 0 0;
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .safety-panel {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      overflow: hidden;
+      background: var(--surface);
+    }
+
+    .safety-row {
+      display: grid;
+      grid-template-columns: 190px minmax(0, 1fr) 230px;
+      gap: 20px;
+      align-items: center;
+      padding: 18px 20px;
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .safety-row:last-child {
+      border-bottom: 0;
+    }
+
+    .class-pill {
+      display: inline-flex;
+      width: fit-content;
+      border-radius: 999px;
+      padding: 5px 9px;
+      color: var(--bg);
+      font-size: 13px;
+      font-weight: 800;
+      line-height: 1.2;
+    }
+
+    .pill-regenerable { background: var(--primary); }
+    .pill-reinstallable { background: var(--cyan); }
+    .pill-cache { background: oklch(0.77 0.13 188); }
+    .pill-browser { background: var(--accent); }
+    .pill-redundant { background: var(--green); }
+    .pill-unclassified { background: var(--warn); }
+    .pill-irreplaceable { background: var(--danger); color: var(--ink); }
+
+    .safety-row p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .recovery {
+      color: var(--ink);
+      font-size: 14px;
+    }
+
+    .split {
+      display: grid;
+      grid-template-columns: minmax(0, 0.95fr) minmax(340px, 0.8fr);
+      gap: 28px;
+      align-items: stretch;
+    }
+
+    .code-card,
+    .notes-card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+    }
+
+    .code-card {
+      padding: 22px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      gap: 24px;
+    }
+
+    .code-card pre {
+      margin: 0;
+      overflow-x: auto;
+      border-radius: 8px;
+      padding: 18px;
+      color: var(--primary);
+      background: oklch(0.06 0 0);
+      border: 1px solid var(--line-soft);
+      font-size: 15px;
+    }
+
+    .notes-card {
+      padding: 22px;
+    }
+
+    .notes-card h3 {
+      font-size: 1.25rem;
+      letter-spacing: -0.02em;
+    }
+
+    .notes-list {
+      margin: 18px 0 0;
+      padding: 0;
+      list-style: none;
+      display: grid;
+      gap: 14px;
+    }
+
+    .notes-list li {
+      border-top: 1px solid var(--line-soft);
+      padding-top: 14px;
+      color: var(--muted);
+    }
+
+    .notes-list strong {
+      color: var(--ink);
+    }
+
+    .links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 22px;
+    }
+
+    .links a {
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 8px 12px;
+      color: var(--ink);
+      text-decoration: none;
+      background: var(--surface);
+      font-size: 14px;
+    }
+
+    .site-footer {
+      border-top: 1px solid var(--line);
+      padding: 30px 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .footer-grid {
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      flex-wrap: wrap;
+    }
+
+    .toast {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 10px 14px;
+      color: var(--ink);
+      background: var(--surface-2);
+      opacity: 0;
+      transform: translateY(10px);
+      transition: opacity 180ms ease, transform 180ms ease;
+      pointer-events: none;
+      z-index: 20;
+    }
+
+    .toast[data-visible="true"] {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    @media (max-width: 960px) {
+      .hero-grid,
+      .section-head,
+      .split {
+        grid-template-columns: 1fr;
+      }
+
+      .hero {
+        padding-top: 48px;
+      }
+
+      h1 {
+        max-width: 11ch;
+      }
+
+      .flow {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .safety-row {
+        grid-template-columns: 1fr;
+        gap: 10px;
+      }
+    }
+
+    @media (max-width: 680px) {
+      .wrap {
+        max-width: 390px;
+        margin-left: 0;
+        margin-right: auto;
+        padding-inline: 14px;
+      }
+
+      .nav {
+        align-items: flex-start;
+        flex-direction: column;
+        padding: 14px 0;
+        gap: 12px;
+      }
+
+      .nav-links {
+        width: 100%;
+        overflow-x: auto;
+        padding-bottom: 2px;
+      }
+
+      .hero-media {
+        margin-inline: -8px;
+        border-radius: 10px;
+        padding: 4px;
+      }
+
+      .flow {
+        grid-template-columns: 1fr;
+      }
+
+      .copy-command {
+        width: 100%;
+        justify-content: flex-start;
+      }
+
+      .copy-command code {
+        max-width: calc(100vw - 112px);
+      }
+
+      section {
+        padding: 56px 0;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+
+      *,
+      *::before,
+      *::after {
+        transition-duration: 0.001ms !important;
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <nav class="wrap nav" aria-label="Main navigation">
+      <a class="brand" href="#top" aria-label="macclean home">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span>macclean</span>
+      </a>
+      <div class="nav-links">
+        <a href="#flow">Flow</a>
+        <a href="#safety">Safety Classes</a>
+        <a href="#install">Install</a>
+        <a href="https://github.com/Ez4T/macclean">GitHub</a>
+      </div>
+    </nav>
+  </header>
+
+  <main id="top">
+    <section class="hero">
+      <div class="wrap hero-grid">
+        <div>
+          <span class="version">v0.2.0 source-available macOS TUI</span>
+          <h1>Classify disk usage before you Reclaim it.</h1>
+          <p class="lede">
+            macclean scans your Mac, groups each Item by Safety Class, shows the Evidence behind the label, and waits for an explicit Confirm before anything is Reclaimed.
+          </p>
+          <div class="actions">
+            <a class="button" href="#install">Install macclean</a>
+            <button class="copy-command" type="button" data-copy="curl -fsSL https://macclean.commaco.tech/install.sh | sh">
+              <code>curl -fsSL https://macclean.commaco.tech/install.sh | sh</code>
+              <span aria-hidden="true">copy</span>
+            </button>
+          </div>
+          <ul class="microfacts" aria-label="Project facts">
+            <li>Runs locally</li>
+            <li>No telemetry</li>
+            <li>No sudo install</li>
+            <li>Explicit Confirm gate</li>
+          </ul>
+          <p class="warning">
+            Warning: macclean Reclaims space by deleting files. It is a personal research project, provided as-is with no warranty, no support, and no liability accepted by the author.
+          </p>
+        </div>
+        <figure class="hero-media">
+          <img src="assets/macclean-tui.png" width="1120" height="700" alt="macclean terminal UI showing Safety Class groups with Regenerable and Reinstallable reclaimable, Browser Cache and Unclassified needing override, and Irreplaceable marked Protected.">
+        </figure>
+      </div>
+    </section>
+
+    <section id="flow">
+      <div class="wrap">
+        <div class="section-head">
+          <h2>The path to deletion stays visible.</h2>
+          <p>macclean is built around recoverability. It avoids vague labels like junk, keeps the proof next to the action, and makes batch Reclaim pass through the same Confirm gate.</p>
+        </div>
+        <div class="flow" aria-label="macclean flow">
+          <article class="flow-step">
+            <span class="mono">01 Scan</span>
+            <h3>Measure on-disk size</h3>
+            <p>Walk the selected root and report actual allocated bytes, not just apparent file length.</p>
+          </article>
+          <article class="flow-step">
+            <span class="mono">02 Classify</span>
+            <h3>Assign Safety Class</h3>
+            <p>Rules label each Item by recovery cost. Unknown paths fail safe to Unclassified.</p>
+          </article>
+          <article class="flow-step">
+            <span class="mono">03 Inspect</span>
+            <h3>Read Evidence</h3>
+            <p>Each class keeps concrete Evidence and a Recovery Method close to the Item.</p>
+          </article>
+          <article class="flow-step">
+            <span class="mono">04 Confirm</span>
+            <h3>Reclaim deliberately</h3>
+            <p>Reclaimable Items are deleted only after Confirm. Protected data is never offered.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="safety">
+      <div class="wrap">
+        <div class="section-head">
+          <h2>Seven Safety Classes, one conservative default.</h2>
+          <p>Only Regenerable, Reinstallable, Cache, and Redundant Copy are offered for Reclaim by default. Browser Cache and Unclassified require override. Irreplaceable is Protected.</p>
+        </div>
+        <div class="safety-panel" role="table" aria-label="Safety Classes">
+          <div class="safety-row" role="row">
+            <span class="class-pill pill-regenerable" role="cell">Regenerable</span>
+            <p role="cell">Build output such as Rust `target/`, Flutter `build/`, or Next.js `.next/`.</p>
+            <span class="recovery mono" role="cell">Recovery: rebuild</span>
+          </div>
+          <div class="safety-row" role="row">
+            <span class="class-pill pill-reinstallable" role="cell">Reinstallable</span>
+            <p role="cell">Dependency trees such as `node_modules` that a package manager restores.</p>
+            <span class="recovery mono" role="cell">Recovery: reinstall</span>
+          </div>
+          <div class="safety-row" role="row">
+            <span class="class-pill pill-cache" role="cell">Cache</span>
+            <p role="cell">Tool caches that refill automatically on next use.</p>
+            <span class="recovery mono" role="cell">Recovery: auto-refill</span>
+          </div>
+          <div class="safety-row" role="row">
+            <span class="class-pill pill-browser" role="cell">Browser Cache</span>
+            <p role="cell">Browser cache directories. Rebuildable, but clearing them has a real browsing cost.</p>
+            <span class="recovery mono" role="cell">Override required</span>
+          </div>
+          <div class="safety-row" role="row">
+            <span class="class-pill pill-redundant" role="cell">Redundant Copy</span>
+            <p role="cell">A byte-identical duplicate confirmed by checksum, with the surviving copy preserved.</p>
+            <span class="recovery mono" role="cell">Recovery: original copy</span>
+          </div>
+          <div class="safety-row" role="row">
+            <span class="class-pill pill-unclassified" role="cell">Unclassified</span>
+            <p role="cell">Large Items the Ruleset cannot prove recoverable. Surfaced for awareness, not auto-offered.</p>
+            <span class="recovery mono" role="cell">Override required</span>
+          </div>
+          <div class="safety-row" role="row">
+            <span class="class-pill pill-irreplaceable" role="cell">Irreplaceable</span>
+            <p role="cell">Databases, VM volumes, documents, and other real data that should not be deleted by the tool.</p>
+            <span class="recovery mono" role="cell">Protected</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="install">
+      <div class="wrap split">
+        <article class="code-card">
+          <div>
+            <h2>Install with one command.</h2>
+            <p class="section-copy">The installer fetches the latest universal macOS binary from GitHub Releases, verifies its SHA-256 checksum, installs to `~/.local/bin`, and updates `~/.zshrc` when needed.</p>
+          </div>
+          <pre><code>curl -fsSL https://macclean.commaco.tech/install.sh | sh</code></pre>
+          <div class="links">
+            <a href="install.sh">Read install.sh</a>
+            <a href="https://github.com/Ez4T/macclean/releases/latest">Latest release</a>
+            <a href="https://github.com/Ez4T/macclean">Build from source</a>
+          </div>
+        </article>
+
+        <aside class="notes-card">
+          <h3>Project details</h3>
+          <ul class="notes-list">
+            <li><strong>Local by default.</strong> Normal Scan and TUI runs make no network calls and collect no telemetry.</li>
+            <li><strong>Unsigned binary.</strong> The public path is the curl installer. Browser downloads are deliberately not the advertised install route.</li>
+            <li><strong>Source-available license.</strong> PolyForm Noncommercial 1.0.0 permits non-commercial use, study, modification, and sharing.</li>
+            <li><strong>Ruleset is data-driven.</strong> Add custom TOML rules at `~/.config/macclean/rules.toml`.</li>
+          </ul>
+          <div class="links">
+            <a href="https://github.com/Ez4T/macclean/blob/main/README.md">README</a>
+            <a href="https://github.com/Ez4T/macclean/blob/main/CONTEXT.md">Vocabulary</a>
+            <a href="adr/0007-public-install-via-curl-sh.md">Install ADR</a>
+            <a href="https://github.com/Ez4T/macclean/blob/main/LICENSE">License</a>
+          </div>
+        </aside>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap footer-grid">
+      <span>macclean is a personal research project by Tanarat.</span>
+      <span>No warranty. No support. Non-commercial use only.</span>
+    </div>
+  </footer>
+
+  <div class="toast" role="status" aria-live="polite">Install command copied</div>
+
+  <script>
+    const copyButton = document.querySelector("[data-copy]");
+    const toast = document.querySelector(".toast");
+
+    copyButton?.addEventListener("click", async () => {
+      const text = copyButton.getAttribute("data-copy");
+      try {
+        await navigator.clipboard.writeText(text);
+        toast.dataset.visible = "true";
+        window.setTimeout(() => {
+          toast.dataset.visible = "false";
+        }, 1800);
+      } catch {
+        window.prompt("Copy the install command:", text);
+      }
+    });
+  </script>
+</body>
+</html>
