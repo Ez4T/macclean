@@ -1,6 +1,6 @@
 [package]
 name = "mac-clean"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "A TUI that surfaces disk usage and classifies each item by safety class before reclaiming space."
 authors = ["Tanarat <tanarats7717@gmail.com>"]
