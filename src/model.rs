@@ -4,10 +4,11 @@
 use std::path::PathBuf;
 
 /// The label assigned to each [`Item`] describing what it is and the cost of
-/// deleting it. Exactly six values (CONTEXT.md → "Safety Class").
+/// deleting it. Exactly seven values (CONTEXT.md → "Safety Class").
 ///
 /// The first four are [`SafetyClass::is_reclaimable`]; `Irreplaceable` is
-/// Protected; `Unclassified` is surfaced but never auto-offered (ADR-0001).
+/// Protected; `Unclassified` and `BrowserCache` are surfaced but never
+/// auto-offered (ADR-0001).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SafetyClass {
     /// Build output a build command recreates. Recovered by *rebuilding*.
@@ -24,6 +25,10 @@ pub enum SafetyClass {
     /// A large Item no [`crate::ruleset::Rule`] matched. Surfaced, but not
     /// reclaimable until the user explicitly overrides (ADR-0001).
     Unclassified,
+    /// A browser cache directory (Safari, Chrome, Firefox, etc.). Browsers
+    /// rebuild it on next use, but clearing it has a perceived cost (slow
+    /// page loads). Requires explicit override before Reclaim.
+    BrowserCache,
 }
 
 impl SafetyClass {
@@ -53,6 +58,7 @@ impl SafetyClass {
             SafetyClass::RedundantCopy => "Redundant Copy",
             SafetyClass::Irreplaceable => "Irreplaceable",
             SafetyClass::Unclassified => "Unclassified",
+            SafetyClass::BrowserCache => "Browser Cache",
         }
     }
 }
@@ -121,6 +127,7 @@ impl Item {
     pub fn may_reclaim(&self) -> bool {
         self.class.is_reclaimable()
             || (self.class == SafetyClass::Unclassified && self.override_reclaim)
+            || (self.class == SafetyClass::BrowserCache && self.override_reclaim)
     }
 
     /// One-line "how you get it back" shown for the highlighted Item and quoted
@@ -130,6 +137,10 @@ impl Item {
     pub fn recovery_line(&self) -> String {
         if self.class == SafetyClass::Unclassified {
             return "moved to Trash on Reclaim — restorable from there".into();
+        }
+        if self.class == SafetyClass::BrowserCache {
+            return "refills automatically on next browser use — override required before Reclaim"
+                .into();
         }
         self.recovery.describe()
     }

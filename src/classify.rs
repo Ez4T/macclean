@@ -167,7 +167,7 @@ fn recovery_for(rule: &Rule) -> RecoveryMethod {
         SafetyClass::Reinstallable => RecoveryMethod::Reinstall {
             command: rule.recover_command.clone().unwrap_or_default(),
         },
-        SafetyClass::Cache => RecoveryMethod::AutoRefill,
+        SafetyClass::Cache | SafetyClass::BrowserCache => RecoveryMethod::AutoRefill,
         _ => RecoveryMethod::None,
     }
 }

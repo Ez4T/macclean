@@ -136,6 +136,57 @@ impl Ruleset {
                     None,
                     "uv cache — refilled automatically on next use.",
                 ),
+                // Browser caches → BrowserCache (issue #38). Browsers rebuild
+                // on next use, but clearing them has a real perceived cost.
+                // Override required before Reclaim.
+                r(
+                    "browser-cache-safari",
+                    Match::PathSuffix { suffix: "Library/Caches/com.apple.Safari".into() },
+                    SafetyClass::BrowserCache,
+                    None,
+                    None,
+                    "Safari browser cache — refills on next browse session.",
+                ),
+                r(
+                    "browser-cache-chrome",
+                    Match::PathSuffix { suffix: "Library/Caches/Google/Chrome".into() },
+                    SafetyClass::BrowserCache,
+                    None,
+                    None,
+                    "Chrome browser cache — refills on next browse session.",
+                ),
+                r(
+                    "browser-cache-firefox",
+                    Match::PathSuffix { suffix: "Library/Caches/Firefox".into() },
+                    SafetyClass::BrowserCache,
+                    None,
+                    None,
+                    "Firefox browser cache — refills on next browse session.",
+                ),
+                r(
+                    "browser-cache-arc",
+                    Match::PathSuffix { suffix: "Library/Caches/Company/Arc".into() },
+                    SafetyClass::BrowserCache,
+                    None,
+                    None,
+                    "Arc browser cache — refills on next browse session.",
+                ),
+                r(
+                    "browser-cache-brave",
+                    Match::PathSuffix { suffix: "Library/Caches/BraveSoftware/Brave-Browser".into() },
+                    SafetyClass::BrowserCache,
+                    None,
+                    None,
+                    "Brave browser cache — refills on next browse session.",
+                ),
+                r(
+                    "browser-cache-edge",
+                    Match::PathSuffix { suffix: "Library/Caches/Microsoft Edge".into() },
+                    SafetyClass::BrowserCache,
+                    None,
+                    None,
+                    "Edge browser cache — refills on next browse session.",
+                ),
                 // Irreplaceable data → Protected (CONTEXT.md, ADR-0001). These make
                 // real, non-recoverable data recognized as data rather than relying
                 // on the Unclassified backstop. None carry a Recovery Method; none
@@ -306,6 +357,27 @@ mod tests {
     #[test]
     fn malformed_user_toml_is_an_error_not_a_panic() {
         assert!(Ruleset::defaults().with_user_rules("this is = not valid").is_err());
+    }
+
+    /// Acceptance for issue #38: the six browser cache rules classify their
+    /// respective `~/Library/Caches/…` paths as BrowserCache via PathSuffix.
+    #[test]
+    fn browser_cache_rules_match_known_paths() {
+        let rs = Ruleset::defaults();
+        let cases = [
+            ("/Users/me/Library/Caches/com.apple.Safari", "browser-cache-safari"),
+            ("/Users/me/Library/Caches/Google/Chrome", "browser-cache-chrome"),
+            ("/Users/me/Library/Caches/Firefox", "browser-cache-firefox"),
+            ("/Users/me/Library/Caches/Company/Arc", "browser-cache-arc"),
+            ("/Users/me/Library/Caches/BraveSoftware/Brave-Browser", "browser-cache-brave"),
+            ("/Users/me/Library/Caches/Microsoft Edge", "browser-cache-edge"),
+        ];
+        for (path, expected_name) in cases {
+            let rule = match_rule_typed(&rs, Path::new(path), true)
+                .unwrap_or_else(|| panic!("{path} should match {expected_name}"));
+            assert_eq!(rule.name, expected_name, "rule name for {path}");
+            assert_eq!(rule.class, SafetyClass::BrowserCache, "class for {path}");
+        }
     }
 
     // --- Richer Match conditions round-trip through TOML (issue #8) ---
