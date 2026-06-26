@@ -375,9 +375,25 @@ fn walk_child_entries(
 
     let mut entries = Vec::new();
     for chunk in children.chunks(CHILD_DIR_OPEN_BATCH) {
+        // For each child resolve to: a leaf entry (no fd) or an open fd to
+        // recurse into. A matched directory skips recursion entirely — its
+        // total subtree size comes from getattrlist in one syscall instead of
+        // statting every file inside (falls back to open+recurse on error).
         let work: Vec<(WalkEntry, Option<OwnedFd>)> = chunk
             .iter()
             .map(|child| {
+                if child.entry.is_dir && child.entry.rule_idx.is_some() {
+                    // Matched dir: skip the full recursive walk entirely.
+                    // Try getattrlist first (one syscall, works on HFS+).
+                    // Fall back to a rule-free jwalk byte count on filesystems
+                    // that don't support ATTR_DIR_ALLOCSIZE (e.g. APFS) — still
+                    // avoids rule-matching overhead for every file in the subtree.
+                    let total = getattrlist_total_size(parent_fd, &child.name)
+                        .unwrap_or_else(|| fast_tree_bytes(&child.entry.path));
+                    let mut entry = child.entry.clone();
+                    entry.bytes = total;
+                    return (entry, None);
+                }
                 let child_dir_fd = if child.entry.is_dir {
                     open_dir_at(parent_fd, &child.name)
                 } else {
@@ -409,6 +425,96 @@ fn walk_child_entries(
     }
 
     entries
+}
+
+/// Get the total allocated size of a directory tree via `getattrlistat` in
+/// a single syscall. Uses `ATTR_DIR_ALLOCSIZE` (dirattr = 0x00000008), which
+/// on HFS+ returns the recursive on-disk size of the whole subtree.
+///
+/// Returns `None` when the filesystem doesn't support the attribute (APFS
+/// returns 0 for this attribute even when the tree is non-empty, which we
+/// treat as unsupported to avoid showing a wrong size); caller uses the
+/// `fast_tree_bytes` fallback in that case.
+fn getattrlist_total_size(parent_fd: RawFd, name: &CStr) -> Option<u64> {
+    extern "C" {
+        fn getattrlistat(
+            fd:          libc::c_int,
+            path:        *const libc::c_char,
+            attr_list:   *mut libc::c_void,
+            attr_buf:    *mut libc::c_void,
+            attr_buf_sz: libc::size_t,
+            options:     libc::c_ulong,
+        ) -> libc::c_int;
+    }
+
+    // sys/attr.h attrlist layout.
+    #[repr(C)]
+    struct AttrList {
+        bitmapcount: u16,
+        reserved:    u16,
+        commonattr:  u32,
+        volattr:     u32,
+        dirattr:     u32,
+        fileattr:    u32,
+        forkattr:    u32,
+    }
+
+    // getattrlist packs attributes at 4-byte boundaries with a 4-byte u32
+    // length prefix. ATTR_DIR_ALLOCSIZE is off_t (8 bytes) at offset 4.
+    // Total buffer: 4 (length word) + 8 (off_t) = 12 bytes.
+    // We use a plain byte array to avoid #[repr(C)] inserting alignment padding
+    // between the length word and the off_t, which would read the wrong bytes.
+    let mut buf = [0u8; 12];
+
+    let mut al = AttrList {
+        bitmapcount: 5,           // ATTR_BIT_MAP_COUNT
+        reserved:    0,
+        commonattr:  0,
+        volattr:     0,
+        dirattr:     0x0000_0008, // ATTR_DIR_ALLOCSIZE
+        fileattr:    0,
+        forkattr:    0,
+    };
+
+    let rc = unsafe {
+        getattrlistat(
+            parent_fd,
+            name.as_ptr(),
+            &mut al as *mut AttrList as *mut libc::c_void,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            buf.len(),
+            0,
+        )
+    };
+
+    if rc != 0 {
+        return None;
+    }
+
+    // off_t at offset 4, native byte order (macOS is always little-endian).
+    let bytes: [u8; 8] = buf[4..12].try_into().ok()?;
+    let total = i64::from_ne_bytes(bytes);
+    // APFS returns 0 for ATTR_DIR_ALLOCSIZE even for large directories.
+    // Treat zero as unsupported so the caller uses the fast_tree_bytes fallback.
+    u64::try_from(total).ok().filter(|&n| n > 0)
+}
+
+/// Fast rule-free recursive byte count for a matched directory. Used as the
+/// fallback when `getattrlist_total_size` is unavailable (e.g. on APFS).
+/// Unlike the main walk this path skips all rule matching and fd-batching
+/// overhead — only the raw stat-per-entry cost remains.
+fn fast_tree_bytes(path: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    jwalk::WalkDir::new(path)
+        .skip_hidden(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .map(|e| {
+            e.metadata()
+                .map(|m| on_disk_bytes_from_blocks(m.blocks() as i64))
+                .unwrap_or(0)
+        })
+        .sum()
 }
 
 fn lstat_path(path: &Path) -> Option<libc::stat> {
@@ -869,6 +975,40 @@ mod tests {
             Some("bigdata"),
         );
         assert!(!unclassified[0].may_reclaim());
+    }
+
+    /// Issue #40: a matched directory's reported size must include its full
+    /// subtree, not just the directory node's own allocated blocks.
+    /// The walk prunes recursion for matched dirs and uses getattrlist instead.
+    #[test]
+    fn matched_dir_size_includes_full_subtree_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // node_modules with nested real content (non-zero to avoid APFS
+        // transparent compression collapsing allocated blocks to near zero).
+        let nm = root.join("node_modules");
+        let pkg = nm.join("pkg").join("lib");
+        fs::create_dir_all(&pkg).unwrap();
+        // 8 × 8KB files ≈ 64KB total payload.
+        let payload: Vec<u8> = (0u8..=255).cycle().take(8 * 1024).collect();
+        for i in 0..8u8 {
+            fs::write(pkg.join(format!("m{i}.js")), &payload).unwrap();
+        }
+
+        let scan = run(root, &Ruleset::defaults(), 1);
+        let nm_item = item_for(&scan, "node_modules");
+
+        assert_eq!(nm_item.class, SafetyClass::Reinstallable);
+        // The reported size must exceed a single empty-directory allocation
+        // (~4–8 KB); if it were just the dir node's own blocks the optimization
+        // broke and the size would be far too small.
+        assert!(
+            nm_item.size_on_disk >= 8 * 8 * 1024,
+            "size {} should cover all nested file content (>= {})",
+            nm_item.size_on_disk,
+            8 * 8 * 1024,
+        );
     }
 
     /// A matched Item owns its whole subtree. A nested directory that would
