@@ -10,7 +10,7 @@ use std::process::Command;
 
 /// The advertised upgrade command (ADR-0007). Printed verbatim when a newer
 /// release exists so the user can reinstall in one line.
-pub const INSTALL_ONE_LINER: &str = "curl -fsSL https://ez4t.github.io/macclean/install.sh | sh";
+pub const INSTALL_ONE_LINER: &str = "curl -fsSL https://macclean.commaco.tech/install.sh | sh";
 
 /// GitHub's `releases/latest` redirect for this repo. Resolving it with curl
 /// yields the canonical `.../releases/tag/vX.Y.Z` URL we read the tag from — no

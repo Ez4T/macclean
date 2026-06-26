@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>macclean TUI capture</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: oklch(0.075 0 0);
+      --panel: oklch(0.13 0.012 120);
+      --panel-2: oklch(0.18 0.014 120);
+      --line: oklch(0.29 0.012 120);
+      --ink: oklch(0.94 0.004 120);
+      --muted: oklch(0.70 0.012 120);
+      --primary: oklch(0.76 0.14 154);
+      --blue: oklch(0.74 0.12 210);
+      --amber: oklch(0.79 0.13 76);
+      --red: oklch(0.68 0.17 28);
+      --yellow: oklch(0.86 0.16 96);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: var(--bg);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+    }
+
+    .frame {
+      width: 1120px;
+      height: 700px;
+      padding: 18px;
+      background: var(--bg);
+    }
+
+    .window {
+      height: 100%;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--panel);
+    }
+
+    .titlebar {
+      height: 42px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 16px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel-2);
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .dots {
+      display: flex;
+      gap: 7px;
+      margin-right: 10px;
+    }
+
+    .dot {
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+    }
+
+    .red { background: oklch(0.68 0.20 28); }
+    .amber { background: oklch(0.78 0.16 74); }
+    .green { background: oklch(0.74 0.16 150); }
+
+    .screen {
+      padding: 20px 22px;
+      color: var(--ink);
+      font-size: 18px;
+      line-height: 1.5;
+    }
+
+    .topline,
+    .footer {
+      display: flex;
+      justify-content: space-between;
+      color: var(--muted);
+    }
+
+    .root {
+      color: var(--ink);
+      font-weight: 700;
+    }
+
+    .scan {
+      color: var(--primary);
+    }
+
+    .box {
+      margin-top: 14px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+
+    .box-title {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      background: oklch(0.105 0.008 120);
+    }
+
+    .row {
+      display: grid;
+      grid-template-columns: 34px 230px 150px 108px 1fr;
+      gap: 18px;
+      padding: 10px 14px;
+      align-items: center;
+      border-bottom: 1px solid oklch(0.22 0.01 120);
+    }
+
+    .row:last-child {
+      border-bottom: 0;
+    }
+
+    .selected {
+      background: oklch(0.19 0.04 150);
+    }
+
+    .check {
+      color: var(--muted);
+    }
+
+    .class {
+      font-weight: 700;
+    }
+
+    .regenerable { color: var(--primary); }
+    .reinstallable { color: var(--blue); }
+    .browser { color: var(--amber); }
+    .unclassified { color: var(--yellow); }
+    .irreplaceable { color: var(--red); }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .reclaimable {
+      color: var(--ink);
+      font-weight: 700;
+    }
+
+    .status {
+      color: var(--amber);
+    }
+
+    .protected {
+      color: var(--red);
+      font-weight: 700;
+    }
+
+    .detail {
+      margin-top: 18px;
+      padding: 12px 14px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      color: var(--muted);
+      background: oklch(0.10 0.008 120);
+    }
+
+    .detail strong {
+      color: var(--ink);
+    }
+
+    .footer {
+      margin-top: 18px;
+      gap: 14px;
+      justify-content: flex-start;
+      font-size: 15px;
+    }
+
+    .key {
+      color: var(--ink);
+      font-weight: 700;
+    }
+  </style>
+</head>
+<body>
+  <main class="frame" aria-label="macclean terminal UI capture">
+    <section class="window">
+      <div class="titlebar">
+        <div class="dots" aria-hidden="true">
+          <span class="dot red"></span>
+          <span class="dot amber"></span>
+          <span class="dot green"></span>
+        </div>
+        macclean - user@macbook - 112.0K reclaimable
+      </div>
+      <div class="screen">
+        <div class="topline">
+          <span><span class="root">/tmp/macclean-demo</span> <span class="scan">scan complete</span></span>
+          <span>v0.2.0</span>
+        </div>
+
+        <section class="box" aria-label="Safety Class groups">
+          <div class="box-title">Groups</div>
+          <div class="row selected">
+            <span class="check">&gt; [ ]</span>
+            <span class="class regenerable">Regenerable</span>
+            <span>64.0K total</span>
+            <span>1 Item</span>
+            <span class="reclaimable">64.0K reclaimable</span>
+          </div>
+          <div class="row">
+            <span class="check">[ ]</span>
+            <span class="class reinstallable">Reinstallable</span>
+            <span>48.0K total</span>
+            <span>1 Item</span>
+            <span class="reclaimable">48.0K reclaimable</span>
+          </div>
+          <div class="row">
+            <span class="check"></span>
+            <span class="class browser">Browser Cache</span>
+            <span>32.0K total</span>
+            <span>1 Item</span>
+            <span class="status">needs override</span>
+          </div>
+          <div class="row">
+            <span class="check"></span>
+            <span class="class unclassified">Unclassified</span>
+            <span>176.0K total</span>
+            <span>3 Items</span>
+            <span class="status">needs override</span>
+          </div>
+          <div class="row">
+            <span class="check"></span>
+            <span class="class irreplaceable">Irreplaceable</span>
+            <span>80.0K total</span>
+            <span>1 Item</span>
+            <span class="protected">Protected</span>
+          </div>
+        </section>
+
+        <div class="detail">
+          <strong>Group:</strong> Regenerable - 1 Item - 64.0K reclaimable - Recovery: rebuild after Reclaim
+        </div>
+
+        <div class="footer">
+          <span><span class="key">Up/Down</span> move</span>
+          <span><span class="key">Space</span> select</span>
+          <span><span class="key">Enter</span> open</span>
+          <span><span class="key">c</span> Confirm</span>
+          <span><span class="key">o</span> override</span>
+          <span><span class="key">q</span> quit</span>
+        </div>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

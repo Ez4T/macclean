@@ -1,7 +1,7 @@
 #!/bin/sh
 # macclean installer — fetches the latest universal binary and drops it on PATH.
 #
-#   curl -fsSL https://ez4t.github.io/macclean/install.sh | sh
+#   curl -fsSL https://macclean.commaco.tech/install.sh | sh
 #
 # Zero prerequisites: no Rust, no Homebrew, no sudo. The binary is unsigned, but
 # because curl (not a browser) fetches it, macOS does not quarantine it, so it
