@@ -323,47 +323,50 @@ fn read_child_entries(
     child_depth: usize,
     ruleset: &Ruleset,
 ) -> Vec<ChildEntry> {
-    let mut children = Vec::new();
+    // Phase 1: sequential readdir — names only, no syscall per entry.
+    let mut names: Vec<CString> = Vec::new();
     loop {
         let dirent = unsafe { libc::readdir(dir) };
         if dirent.is_null() {
             break;
         }
-
         let name = unsafe { CStr::from_ptr((*dirent).d_name.as_ptr()) };
         if matches!(name.to_bytes(), b"." | b"..") {
             continue;
         }
-
-        let Some(stat) = fstatat_no_follow(raw_fd, name) else {
-            continue;
-        };
-
-        let is_dir = mode_is_dir(stat.st_mode);
-        let child_path = dir_path.join(OsString::from_vec(name.to_bytes().to_vec()));
-        let rule_idx = {
-            let probe = FdRuleProbe {
-                path: &child_path,
-                parent_fd: Some(raw_fd),
-                entry_name: Some(name),
-                dir_fd: None,
-            };
-            match_rule_index_with_probe(ruleset, &child_path, is_dir, &probe)
-        };
-
-        children.push(ChildEntry {
-            entry: WalkEntry {
-                path: child_path,
-                depth: child_depth,
-                is_dir,
-                bytes: stat_on_disk_bytes(&stat),
-                rule_idx,
-            },
-            name: name.to_owned(),
-        });
+        names.push(name.to_owned());
     }
 
-    children
+    // Phase 2: parallel fstatat + rule matching — one syscall per entry but
+    // all entries run concurrently across rayon workers. For flat dirs with
+    // many files (e.g. ~/Library, a large node_modules) this is the hot path.
+    names
+        .into_par_iter()
+        .filter_map(|name| {
+            let stat = fstatat_no_follow(raw_fd, &name)?;
+            let is_dir = mode_is_dir(stat.st_mode);
+            let child_path = dir_path.join(OsString::from_vec(name.to_bytes().to_vec()));
+            let rule_idx = {
+                let probe = FdRuleProbe {
+                    path: &child_path,
+                    parent_fd: Some(raw_fd),
+                    entry_name: Some(&name),
+                    dir_fd: None,
+                };
+                match_rule_index_with_probe(ruleset, &child_path, is_dir, &probe)
+            };
+            Some(ChildEntry {
+                entry: WalkEntry {
+                    path: child_path,
+                    depth: child_depth,
+                    is_dir,
+                    bytes: stat_on_disk_bytes(&stat),
+                    rule_idx,
+                },
+                name,
+            })
+        })
+        .collect()
 }
 
 fn walk_child_entries(
@@ -380,7 +383,7 @@ fn walk_child_entries(
         // total subtree size comes from getattrlist in one syscall instead of
         // statting every file inside (falls back to open+recurse on error).
         let work: Vec<(WalkEntry, Option<OwnedFd>)> = chunk
-            .iter()
+            .par_iter()
             .map(|child| {
                 if child.entry.is_dir && child.entry.rule_idx.is_some() {
                     // Matched dir: skip the full recursive walk entirely.
@@ -427,15 +430,23 @@ fn walk_child_entries(
     entries
 }
 
-/// Get the total allocated size of a directory tree via `getattrlistat` in
-/// a single syscall. Uses `ATTR_DIR_ALLOCSIZE` (dirattr = 0x00000008), which
-/// on HFS+ returns the recursive on-disk size of the whole subtree.
-///
-/// Returns `None` when the filesystem doesn't support the attribute (APFS
-/// returns 0 for this attribute even when the tree is non-empty, which we
-/// treat as unsupported to avoid showing a wrong size); caller uses the
-/// `fast_tree_bytes` fallback in that case.
+/// Get the total size of a directory tree via `getattrlistat` in a single
+/// syscall. Tries `ATTR_CMN_TOTALSIZE` (commonattr=0x400) first — this is the
+/// attribute macOS uses for "Get Info" totals and works on both APFS and HFS+.
+/// Falls back to `ATTR_DIR_ALLOCSIZE` (dirattr=0x8) which only works on HFS+.
+/// Returns `None` when both return zero (unexpected empty or unsupported fs);
+/// caller falls back to `fast_tree_bytes` in that case.
 fn getattrlist_total_size(parent_fd: RawFd, name: &CStr) -> Option<u64> {
+    getattrlistat_single_size(parent_fd, name, 0x0000_0400, 0)
+        .or_else(|| getattrlistat_single_size(parent_fd, name, 0, 0x0000_0008))
+}
+
+fn getattrlistat_single_size(
+    parent_fd: RawFd,
+    name:      &CStr,
+    commonattr: u32,
+    dirattr:    u32,
+) -> Option<u64> {
     extern "C" {
         fn getattrlistat(
             fd:          libc::c_int,
@@ -447,7 +458,6 @@ fn getattrlist_total_size(parent_fd: RawFd, name: &CStr) -> Option<u64> {
         ) -> libc::c_int;
     }
 
-    // sys/attr.h attrlist layout.
     #[repr(C)]
     struct AttrList {
         bitmapcount: u16,
@@ -460,18 +470,15 @@ fn getattrlist_total_size(parent_fd: RawFd, name: &CStr) -> Option<u64> {
     }
 
     // getattrlist packs attributes at 4-byte boundaries with a 4-byte u32
-    // length prefix. ATTR_DIR_ALLOCSIZE is off_t (8 bytes) at offset 4.
-    // Total buffer: 4 (length word) + 8 (off_t) = 12 bytes.
-    // We use a plain byte array to avoid #[repr(C)] inserting alignment padding
-    // between the length word and the off_t, which would read the wrong bytes.
+    // length prefix. The requested off_t is at offset 4 (8 bytes).
     let mut buf = [0u8; 12];
 
     let mut al = AttrList {
-        bitmapcount: 5,           // ATTR_BIT_MAP_COUNT
+        bitmapcount: 5,
         reserved:    0,
-        commonattr:  0,
+        commonattr,
         volattr:     0,
-        dirattr:     0x0000_0008, // ATTR_DIR_ALLOCSIZE
+        dirattr,
         fileattr:    0,
         forkattr:    0,
     };
@@ -491,30 +498,67 @@ fn getattrlist_total_size(parent_fd: RawFd, name: &CStr) -> Option<u64> {
         return None;
     }
 
-    // off_t at offset 4, native byte order (macOS is always little-endian).
     let bytes: [u8; 8] = buf[4..12].try_into().ok()?;
     let total = i64::from_ne_bytes(bytes);
-    // APFS returns 0 for ATTR_DIR_ALLOCSIZE even for large directories.
-    // Treat zero as unsupported so the caller uses the fast_tree_bytes fallback.
     u64::try_from(total).ok().filter(|&n| n > 0)
 }
 
-/// Fast rule-free recursive byte count for a matched directory. Used as the
-/// fallback when `getattrlist_total_size` is unavailable (e.g. on APFS).
-/// Unlike the main walk this path skips all rule matching and fd-batching
-/// overhead — only the raw stat-per-entry cost remains.
+/// Rule-free recursive byte count using the same parallel fd-relative walker as
+/// the main scan, but without rule matching. Used as the fallback when
+/// `getattrlist_total_size` is unavailable (e.g. on APFS). Parallelises both
+/// the fstatat calls within each directory and the recursion across siblings,
+/// so it saturates all rayon workers rather than staying single-threaded.
 fn fast_tree_bytes(path: &Path) -> u64 {
-    use std::os::unix::fs::MetadataExt;
-    jwalk::WalkDir::new(path)
-        .skip_hidden(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .map(|e| {
-            e.metadata()
-                .map(|m| on_disk_bytes_from_blocks(m.blocks() as i64))
-                .unwrap_or(0)
+    let Some(root_stat) = lstat_path(path) else {
+        return 0;
+    };
+    let own = stat_on_disk_bytes(&root_stat);
+    if !mode_is_dir(root_stat.st_mode) {
+        return own;
+    }
+    let Some(dir_fd) = open_dir_path(path) else {
+        return own;
+    };
+    own + fast_dir_bytes(dir_fd)
+}
+
+/// Parallel fd-relative byte-counter for an already-open directory.
+/// Sequential readdir collects names; parallel fstatat + recursive descent
+/// measures sizes across all rayon workers. Mirrors `walk_child_entries` but
+/// returns a plain u64 instead of a WalkEntry stream.
+fn fast_dir_bytes(dir_fd: OwnedFd) -> u64 {
+    let raw_fd = dir_fd.into_raw_fd();
+    let dir = unsafe { libc::fdopendir(raw_fd) };
+    if dir.is_null() {
+        unsafe { libc::close(raw_fd); }
+        return 0;
+    }
+
+    let mut names: Vec<CString> = Vec::new();
+    loop {
+        let dirent = unsafe { libc::readdir(dir) };
+        if dirent.is_null() { break; }
+        let name = unsafe { CStr::from_ptr((*dirent).d_name.as_ptr()) };
+        if matches!(name.to_bytes(), b"." | b"..") { continue; }
+        names.push(name.to_owned());
+    }
+
+    let total: u64 = names
+        .into_par_iter()
+        .map(|name| {
+            let Some(stat) = fstatat_no_follow(raw_fd, &name) else { return 0; };
+            let own = stat_on_disk_bytes(&stat);
+            if mode_is_dir(stat.st_mode) {
+                if let Some(child_fd) = open_dir_at(raw_fd, &name) {
+                    return own + fast_dir_bytes(child_fd);
+                }
+            }
+            own
         })
-        .sum()
+        .sum();
+
+    unsafe { libc::closedir(dir); }
+    total
 }
 
 fn lstat_path(path: &Path) -> Option<libc::stat> {

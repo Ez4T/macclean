@@ -129,12 +129,36 @@ impl Ruleset {
                     "npm download cache — refilled automatically on next install.",
                 ),
                 r(
+                    "bun-cache",
+                    Match::PathSuffix { suffix: ".bun/install/cache".into() },
+                    SafetyClass::Cache,
+                    None,
+                    None,
+                    "Bun install cache — refilled automatically on next install.",
+                ),
+                r(
                     "uv-cache",
                     Match::PathSuffix { suffix: ".cache/uv".into() },
                     SafetyClass::Cache,
                     None,
                     None,
                     "uv cache — refilled automatically on next use.",
+                ),
+                r(
+                    "cargo-registry",
+                    Match::PathSuffix { suffix: ".cargo/registry".into() },
+                    SafetyClass::Cache,
+                    None,
+                    None,
+                    "Cargo registry cache — re-downloaded automatically on next build.",
+                ),
+                r(
+                    "cargo-git",
+                    Match::PathSuffix { suffix: ".cargo/git".into() },
+                    SafetyClass::Cache,
+                    None,
+                    None,
+                    "Cargo git dependency cache — re-cloned automatically on next build.",
                 ),
                 // Browser caches → BrowserCache (issue #38). Browsers rebuild
                 // on next use, but clearing them has a real perceived cost.
@@ -230,6 +254,24 @@ impl Ruleset {
                     None,
                     None,
                     "A PG_VERSION marker sits here — this is a live PostgreSQL data directory.",
+                ),
+                // Container/VM runtime directories — treated as opaque blocks so
+                // the scanner doesn't descend into overlay filesystem layers.
+                r(
+                    "orbstack-docker",
+                    Match::PathSuffix { suffix: "OrbStack/docker".into() },
+                    SafetyClass::Irreplaceable,
+                    None,
+                    None,
+                    "OrbStack Docker data — container images, volumes, and overlay layers. Manage via OrbStack or Docker CLI.",
+                ),
+                r(
+                    "docker-desktop-data",
+                    Match::PathSuffix { suffix: "Library/Containers/com.docker.docker".into() },
+                    SafetyClass::Irreplaceable,
+                    None,
+                    None,
+                    "Docker Desktop VM and image data. Manage via Docker Desktop.",
                 ),
             ],
         }
