@@ -430,15 +430,18 @@ fn walk_child_entries(
     entries
 }
 
-/// Get the total size of a directory tree via `getattrlistat` in a single
-/// syscall. Tries `ATTR_CMN_TOTALSIZE` (commonattr=0x400) first — this is the
-/// attribute macOS uses for "Get Info" totals and works on both APFS and HFS+.
-/// Falls back to `ATTR_DIR_ALLOCSIZE` (dirattr=0x8) which only works on HFS+.
-/// Returns `None` when both return zero (unexpected empty or unsupported fs);
-/// caller falls back to `fast_tree_bytes` in that case.
+/// Get the total allocated size of a directory tree via `getattrlistat` in a
+/// single syscall, using `ATTR_DIR_ALLOCSIZE` (dirattr=0x8). This works on HFS+
+/// but returns 0 on APFS, where there is no single-syscall recursive total — the
+/// caller then falls back to the rule-free `fast_tree_bytes` walk (ADR-0006).
+///
+/// There is deliberately no `ATTR_CMN_*` size attempt here: macOS exposes no
+/// `ATTR_CMN_TOTALSIZE`. An earlier version requested commonattr `0x400`, which
+/// is actually `ATTR_CMN_MODTIME`, so every matched directory reported the
+/// current Unix timestamp (~1.7 GiB) as its size and the reclaimable total
+/// ballooned to impossible figures (issue #43).
 fn getattrlist_total_size(parent_fd: RawFd, name: &CStr) -> Option<u64> {
-    getattrlistat_single_size(parent_fd, name, 0x0000_0400, 0)
-        .or_else(|| getattrlistat_single_size(parent_fd, name, 0, 0x0000_0008))
+    getattrlistat_single_size(parent_fd, name, 0, 0x0000_0008)
 }
 
 fn getattrlistat_single_size(
@@ -1053,6 +1056,120 @@ mod tests {
             nm_item.size_on_disk,
             8 * 8 * 1024,
         );
+    }
+
+    /// Issue #43 (headline): a matched directory's size must track its actual
+    /// content, not a stray attribute. The earlier code requested `ATTR_CMN_MODTIME`
+    /// (commonattr 0x400) thinking it was a total-size attribute, so every matched
+    /// dir reported the current Unix timestamp (~1.7 GiB) and the reclaimable total
+    /// blew past the physical disk. The old `>= content` lower bound passed straight
+    /// through that garbage; this pins an upper bound so the regression can't return.
+    #[test]
+    fn matched_dir_size_tracks_content_not_a_timestamp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        let nm = root.join("node_modules");
+        fs::create_dir_all(&nm).unwrap();
+        // ~256 KB of real payload (incompressible, so blocks are actually allocated).
+        let payload: Vec<u8> = (0u8..=255).cycle().take(64 * 1024).collect();
+        for i in 0..4u8 {
+            fs::write(nm.join(format!("m{i}.bin")), &payload).unwrap();
+        }
+
+        let scan = run(root, &Ruleset::defaults(), 1);
+        let nm_item = item_for(&scan, "node_modules");
+
+        // Real content is ~256 KB; allow generous slack for filesystem overhead but
+        // stay far below the ~1.7 GiB a leaked timestamp would produce.
+        assert!(
+            nm_item.size_on_disk < 64 * 1024 * 1024,
+            "size {} looks like a leaked attribute, not 256 KB of content",
+            nm_item.size_on_disk,
+        );
+        assert!(nm_item.size_on_disk >= 4 * 64 * 1024);
+    }
+
+    /// Issue #43 (root cause #2): no Reclaimable Item may surface below a matched
+    /// Irreplaceable ancestor. OrbStack's Docker data holds overlay layers that
+    /// each carry their own node_modules/target; matching `OrbStack/docker` whole
+    /// must prune them so they never inflate the reclaimable total.
+    #[test]
+    fn no_reclaimable_item_below_a_matched_irreplaceable_ancestor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // ~/OrbStack/docker — matched Irreplaceable (one opaque block).
+        let docker = root.join("OrbStack").join("docker");
+        // A snapshot/overlay layer carrying caches that WOULD match on their own.
+        let layer = docker.join("containers").join("layer0");
+        let inner_nm = layer.join("node_modules");
+        let inner_target = layer.join("app").join("target");
+        fs::create_dir_all(&inner_nm).unwrap();
+        fs::create_dir_all(&inner_target).unwrap();
+        fs::write(layer.join("app").join("Cargo.toml"), b"[package]\n").unwrap();
+        let payload: Vec<u8> = (0u8..=255).cycle().take(64 * 1024).collect();
+        fs::write(inner_nm.join("index.js"), &payload).unwrap();
+        fs::write(inner_target.join("build-output"), &payload).unwrap();
+
+        let scan = run(root, &Ruleset::defaults(), 1);
+
+        let docker_item = item_for(&scan, "docker");
+        assert_eq!(docker_item.class, SafetyClass::Irreplaceable);
+        assert!(docker_item.class.is_protected());
+        assert!(!docker_item.may_reclaim());
+
+        // Nothing inside the matched Irreplaceable subtree may appear as its own
+        // Item — not the overlay's node_modules, not its target/.
+        for inner in ["node_modules", "target", "layer0", "containers"] {
+            assert!(
+                scan.items
+                    .iter()
+                    .all(|i| i.path.file_name().and_then(|n| n.to_str()) != Some(inner)),
+                "{inner} below OrbStack/docker must be pruned, not surfaced",
+            );
+        }
+
+        // The reclaimable total counts none of the pruned inner caches.
+        assert_eq!(scan.reclaimable_bytes(), 0);
+    }
+
+    /// Issue #43 (root cause #3): Treehouse's per-PR workspaces collapse into a
+    /// single `.treehouse` Item instead of thousands of inner node_modules/target
+    /// Items. The whole tree is the Reclaimable unit.
+    #[test]
+    fn treehouse_collapses_into_one_reclaimable_item() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // ~/.treehouse/<project>/<n> isolated checkouts, each with its own caches.
+        let payload: Vec<u8> = (0u8..=255).cycle().take(64 * 1024).collect();
+        for n in 0..3 {
+            let env = root.join(".treehouse").join("proj").join(n.to_string());
+            let nm = env.join("node_modules");
+            let target = env.join("target");
+            fs::create_dir_all(&nm).unwrap();
+            fs::create_dir_all(&target).unwrap();
+            fs::write(env.join("Cargo.toml"), b"[package]\n").unwrap();
+            fs::write(nm.join("index.js"), &payload).unwrap();
+            fs::write(target.join("build-output"), &payload).unwrap();
+        }
+
+        let scan = run(root, &Ruleset::defaults(), 1);
+
+        let treehouse = item_for(&scan, ".treehouse");
+        assert_eq!(treehouse.class, SafetyClass::Regenerable);
+        assert!(treehouse.may_reclaim());
+        // Inner workspaces are subsumed, never surfaced on their own.
+        assert!(
+            scan.items
+                .iter()
+                .all(|i| i.path.file_name().and_then(|n| n.to_str()) != Some("node_modules")),
+            "per-workspace node_modules must be pruned under .treehouse",
+        );
+        // The consolidated Item is the only Reclaimable, and it carries the bytes.
+        assert_eq!(scan.reclaimable_bytes(), treehouse.size_on_disk);
+        assert!(treehouse.size_on_disk >= 6 * 64 * 1024);
     }
 
     /// A matched Item owns its whole subtree. A nested directory that would

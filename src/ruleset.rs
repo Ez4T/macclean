@@ -112,6 +112,20 @@ impl Ruleset {
                     Some("next build"),
                     "package.json sits beside this .next/ — Next.js build output.",
                 ),
+                // Treehouse workspace-per-PR tool: each `~/.treehouse/<project>/<n>`
+                // is an isolated checkout that Treehouse recreates on demand, and
+                // every one carries its own node_modules/target. Without this rule
+                // the Scan surfaces those thousands of inner build dirs as separate
+                // Items (issue #43). Matching `.treehouse` whole prunes that subtree
+                // into a single Regenerable Item — the user reclaims it in one move.
+                r(
+                    "treehouse-workspaces",
+                    Match::PathSuffix { suffix: ".treehouse".into() },
+                    SafetyClass::Regenerable,
+                    None,
+                    Some("treehouse recreates per-PR workspaces on demand"),
+                    ".treehouse — Treehouse per-PR workspaces, recreated on demand from your repos.",
+                ),
                 r(
                     "node-modules",
                     Match::DirNamed { dir: "node_modules".into() },
@@ -420,6 +434,20 @@ mod tests {
             assert_eq!(rule.name, expected_name, "rule name for {path}");
             assert_eq!(rule.class, SafetyClass::BrowserCache, "class for {path}");
         }
+    }
+
+    /// Issue #43: a `.treehouse` directory matches as one Regenerable Item so the
+    /// Scan consolidates Treehouse's per-PR workspaces instead of surfacing each
+    /// inner node_modules/target separately.
+    #[test]
+    fn treehouse_dir_matches_as_one_regenerable_item() {
+        let rs = Ruleset::defaults();
+        let rule = match_rule_typed(&rs, Path::new("/Users/me/.treehouse"), true)
+            .expect(".treehouse should match the Treehouse Rule");
+        assert_eq!(rule.name, "treehouse-workspaces");
+        assert_eq!(rule.class, SafetyClass::Regenerable);
+        // A path that merely contains the fragment mid-string does not end with it.
+        assert!(match_rule_typed(&rs, Path::new("/Users/me/.treehouse/proj/0"), true).is_none());
     }
 
     // --- Richer Match conditions round-trip through TOML (issue #8) ---
