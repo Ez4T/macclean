@@ -10,30 +10,35 @@
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://macclean.commaco.tech/">
   <meta property="og:image" content="https://macclean.commaco.tech/assets/macclean-tui.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&amp;family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
   <style>
     :root {
       color-scheme: dark;
-      --bg: oklch(0.075 0 0);
-      --bg-soft: oklch(0.105 0.008 120);
-      --surface: oklch(0.135 0.012 120);
-      --surface-2: oklch(0.18 0.014 120);
-      --surface-3: oklch(0.22 0.016 120);
-      --line: oklch(0.31 0.012 120);
-      --line-soft: oklch(0.24 0.01 120);
-      --ink: oklch(0.94 0.004 120);
-      --muted: oklch(0.72 0.012 120);
-      --muted-2: oklch(0.60 0.012 120);
-      --primary: oklch(0.76 0.14 154);
-      --primary-ink: oklch(0.08 0 0);
-      --accent: oklch(0.79 0.13 76);
-      --danger: oklch(0.68 0.17 28);
-      --warn: oklch(0.86 0.16 96);
-      --cyan: oklch(0.74 0.12 210);
-      --violet: oklch(0.74 0.13 305);
-      --green: oklch(0.78 0.15 145);
-      --max: 1180px;
-      --radius: 10px;
-      --shadow: 0 8px 0 oklch(0.02 0 0 / 0.35);
+      --bg: #0a0c0e;
+      --bg-2: #0d1117;
+      --panel: #161b22;
+      --panel-2: #1b1f28;
+      --panel-3: #1c2128;
+      --panel-status: #12151c;
+      --line: rgba(255, 255, 255, 0.1);
+      --line-soft: rgba(255, 255, 255, 0.07);
+      --ink: #f0f6fc;
+      --text: #cdd5de;
+      --muted: #768390;
+      --quiet: #56647a;
+      --faint: #3b4552;
+      --green: #3fb950;
+      --green-soft: #1a7f37;
+      --green-wash: rgba(63, 185, 80, 0.22);
+      --cyan: #4dc9d4;
+      --yellow: #d4a52a;
+      --orange: #d29922;
+      --red: #f47067;
+      --purple: #bc8cff;
+      --max: 1160px;
+      --radius: 8px;
     }
 
     * {
@@ -48,92 +53,84 @@
     body {
       margin: 0;
       background:
-        radial-gradient(circle at 18% 8%, oklch(0.24 0.045 150 / 0.5), transparent 34rem),
-        linear-gradient(180deg, oklch(0.09 0.004 120), var(--bg) 36rem);
-      color: var(--ink);
-      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        linear-gradient(180deg, #0d1117, var(--bg) 520px),
+        var(--bg);
+      color: var(--text);
+      font-family: "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       font-size: 16px;
-      line-height: 1.6;
+      line-height: 1.62;
       text-rendering: optimizeLegibility;
       -webkit-font-smoothing: antialiased;
       overflow-x: clip;
     }
 
-    body::before {
-      content: "";
-      position: fixed;
-      inset: 0 0 auto;
-      height: 3px;
-      background: linear-gradient(90deg, var(--primary), var(--accent), var(--danger));
-      z-index: 10;
-    }
-
     a {
       color: inherit;
-      text-decoration-color: oklch(0.76 0.14 154 / 0.5);
-      text-underline-offset: 0.18em;
+      text-decoration-color: rgba(63, 185, 80, 0.42);
+      text-underline-offset: 0.2em;
     }
 
     a:hover {
-      text-decoration-color: var(--primary);
+      color: var(--ink);
+      text-decoration-color: var(--green);
     }
 
     img {
+      display: block;
       max-width: 100%;
       height: auto;
-      display: block;
-    }
-
-    figure {
-      margin: 0;
     }
 
     code,
     pre,
     .mono {
-      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
     }
 
     .wrap {
       width: 100%;
       max-width: calc(var(--max) + 40px);
-      margin: 0 auto;
+      margin-inline: auto;
       padding-inline: 20px;
     }
 
     .site-header {
       position: sticky;
-      top: 3px;
-      z-index: 9;
-      border-bottom: 1px solid oklch(0.31 0.012 120 / 0.5);
-      background: oklch(0.075 0 0 / 0.86);
-      backdrop-filter: blur(14px);
+      top: 0;
+      z-index: 10;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+      background: rgba(10, 12, 14, 0.92);
+      backdrop-filter: blur(16px);
     }
 
     .nav {
-      min-height: 62px;
+      min-height: 58px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 24px;
+      gap: 22px;
     }
 
     .brand {
       display: inline-flex;
       align-items: center;
       gap: 10px;
-      font-weight: 780;
-      letter-spacing: -0.02em;
+      color: var(--ink);
+      font-weight: 720;
+      letter-spacing: -0.01em;
       text-decoration: none;
     }
 
     .brand-mark {
-      width: 18px;
-      height: 18px;
-      border: 1px solid var(--primary);
-      border-radius: 4px;
-      background: linear-gradient(135deg, var(--primary), oklch(0.46 0.08 154));
-      box-shadow: inset 0 0 0 4px var(--bg);
+      width: 22px;
+      height: 22px;
+      display: grid;
+      place-items: center;
+      border-radius: 5px;
+      background: var(--green-soft);
+      border: 1px solid rgba(63, 185, 80, 0.55);
+      color: var(--green);
+      font: 700 13px/1 "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     }
 
     .nav-links {
@@ -141,177 +138,416 @@
       align-items: center;
       gap: 22px;
       color: var(--muted);
-      font-size: 14px;
+      font-size: 13px;
     }
 
     .nav-links a {
       text-decoration: none;
     }
 
-    .nav-links a:hover {
-      color: var(--ink);
+    .hero {
+      min-height: calc(100vh - 58px);
+      display: flex;
+      align-items: center;
+      padding: 100px 40px 80px;
     }
 
-    .hero {
-      padding: clamp(58px, 9vw, 116px) 0 70px;
+    .hero .wrap {
+      max-width: 1200px;
+      padding-inline: 0;
     }
 
     .hero-grid {
       display: grid;
-      grid-template-columns: minmax(0, 0.9fr) minmax(420px, 1.1fr);
-      gap: clamp(32px, 5vw, 68px);
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 80px;
       align-items: center;
+    }
+
+    .hero-copy {
+      display: flex;
+      width: 100%;
+      max-width: 100%;
+      flex-direction: column;
+      gap: 24px;
     }
 
     .hero-grid > *,
     .section-head > *,
-    .split > * {
+    .install-grid > * {
       min-width: 0;
     }
 
-    .version {
-      display: inline-flex;
+    .hero-badges {
+      display: flex;
+      flex-wrap: wrap;
       align-items: center;
-      gap: 9px;
-      border: 1px solid var(--line);
-      border-radius: 999px;
-      padding: 6px 10px;
-      color: var(--muted);
-      background: var(--bg-soft);
-      font-size: 13px;
+      gap: 7px;
     }
 
-    .version::before {
-      content: "";
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: var(--primary);
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--green);
+      border: 1px solid rgba(63, 185, 80, 0.28);
+      border-radius: 4px;
+      padding: 3px 10px;
+      background: rgba(26, 127, 55, 0.32);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+    }
+
+    .tag.secondary {
+      color: var(--quiet);
+      border-color: rgba(255, 255, 255, 0.07);
+      background: rgba(255, 255, 255, 0.04);
     }
 
     h1,
     h2,
     h3 {
       margin: 0;
-      line-height: 1.05;
+      color: var(--ink);
+      line-height: 1.08;
+      letter-spacing: -0.028em;
       text-wrap: balance;
-      letter-spacing: -0.035em;
     }
 
     h1 {
-      max-width: 12ch;
-      margin-top: 22px;
-      font-size: clamp(3.4rem, 8vw, 5.8rem);
+      max-width: 13ch;
+      font-size: clamp(32px, 4.2vw, 56px);
+      font-weight: 700;
+      line-height: 1.09;
+      letter-spacing: -0.035em;
+    }
+
+    .hero h1 {
+      max-width: none;
+    }
+
+    h1 .accent {
+      color: var(--green);
+      text-shadow: 0 0 28px rgba(63, 185, 80, 0.24);
+    }
+
+    h2 {
+      font-size: clamp(2rem, 4vw, 3.15rem);
+    }
+
+    h3 {
+      font-size: 1rem;
+      letter-spacing: -0.01em;
     }
 
     .lede {
-      max-width: 62ch;
-      margin: 24px 0 0;
+      width: 100%;
+      max-width: 440px;
+      margin: 0;
       color: var(--muted);
-      font-size: 1.125rem;
+      font-size: 17px;
+      line-height: 1.65;
       text-wrap: pretty;
+      overflow-wrap: break-word;
     }
 
     .actions {
-      margin-top: 32px;
       display: flex;
-      flex-wrap: wrap;
-      gap: 12px;
+      width: 100%;
+      max-width: 500px;
       align-items: center;
+      gap: 10px;
+      border: 1px solid var(--line-soft);
+      border-radius: 8px;
+      padding: 10px 14px;
+      background: var(--bg-2);
     }
 
-    .button,
     .copy-command {
-      min-height: 44px;
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      gap: 10px;
-      border-radius: 999px;
-      padding: 10px 16px;
-      font-weight: 700;
       text-decoration: none;
       cursor: pointer;
     }
 
-    .button {
-      border: 1px solid var(--primary);
-      background: var(--primary);
-      color: var(--primary-ink);
-    }
-
-    .button:hover,
-    .button:focus-visible {
-      background: oklch(0.82 0.14 154);
-    }
-
     .copy-command {
-      width: fit-content;
+      flex-shrink: 0;
+      min-height: 28px;
+      border: 1px solid var(--line-soft);
+      border-radius: 4px;
+      padding: 4px 10px;
+      background: transparent;
+      color: var(--quiet);
+      font-size: 11px;
+      transition: color 150ms ease, border-color 150ms ease, background 150ms ease;
+    }
+
+    .copy-command:hover,
+    .copy-command:focus-visible {
+      color: var(--text);
+      border-color: var(--line);
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    .command-text {
+      flex: 1;
       max-width: 100%;
       min-width: 0;
-      border: 1px solid var(--line);
-      color: var(--ink);
-      background: var(--surface);
-      font-size: 14px;
-    }
-
-    .copy-command code {
-      min-width: 0;
+      color: var(--text);
+      font-size: 12px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
 
+    .prompt {
+      flex-shrink: 0;
+      color: var(--quiet);
+      font-size: 12px;
+    }
+
     .microfacts {
       display: flex;
       flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 24px;
+      gap: 8px;
+      margin: 0;
       padding: 0;
       list-style: none;
       color: var(--muted);
-      font-size: 14px;
+      font-size: 13px;
     }
 
     .microfacts li {
-      border: 1px solid var(--line-soft);
+      border: 1px solid rgba(255, 255, 255, 0.07);
       border-radius: 999px;
-      padding: 6px 10px;
-      background: oklch(0.10 0.006 120 / 0.72);
-    }
-
-    .hero-media {
-      border: 1px solid var(--line);
-      border-radius: 16px;
-      padding: 8px;
-      background: var(--surface);
-      box-shadow: var(--shadow);
+      padding: 4px 12px;
+      background: transparent;
     }
 
     .warning {
-      margin-top: 18px;
-      border: 1px solid oklch(0.68 0.17 28 / 0.55);
-      border-radius: var(--radius);
-      padding: 14px 16px;
-      color: oklch(0.84 0.09 46);
-      background: oklch(0.15 0.045 32 / 0.62);
-      font-size: 14px;
+      width: 100%;
+      max-width: 52ch;
+      margin: 0;
+      border: 1px solid var(--line-soft);
+      border-radius: 6px;
+      padding: 10px 12px;
+      color: var(--faint);
+      background: transparent;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+
+    .hero-art {
+      position: relative;
+    }
+
+    .hero-art::before {
+      content: "";
+      position: absolute;
+      inset: -60px;
+      z-index: -1;
+      background: radial-gradient(ellipse 70% 60% at 50% 50%, rgba(63, 185, 80, 0.08), transparent 70%);
+      pointer-events: none;
+    }
+
+    .terminal {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--panel);
+      box-shadow: 0 24px 64px rgba(0, 0, 0, 0.6);
+      font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      user-select: none;
+    }
+
+    .terminal-bar {
+      min-height: 36px;
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      padding: 0 15px;
+      border-bottom: 1px solid var(--line-soft);
+      background: var(--bg-2);
+    }
+
+    .dot {
+      width: 11px;
+      height: 11px;
+      border-radius: 50%;
+    }
+
+    .dot.red { background: #ff5f57; }
+    .dot.yellow { background: #febc2e; }
+    .dot.green { background: #28c840; }
+
+    .terminal-title {
+      margin-left: 7px;
+      color: var(--quiet);
+      font-size: 12px;
+    }
+
+    .terminal-screen {
+      background: var(--panel-2);
+      font-size: 12px;
+      line-height: 1.7;
+      overflow: hidden;
+    }
+
+    .term-status,
+    .term-footer,
+    .term-command {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-height: 26px;
+      padding: 2px 14px;
+      background: var(--panel-status);
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .term-status {
+      border-bottom: 1px solid var(--line-soft);
+    }
+
+    .term-footer,
+    .term-command {
+      border-top: 1px solid var(--line-soft);
+    }
+
+    .term-command {
+      background: var(--bg-2);
+      color: var(--text);
+    }
+
+    .term-spacer {
+      flex: 1;
+    }
+
+    .term-list {
+      position: relative;
+      min-height: 342px;
+      padding: 6px 0 0;
+    }
+
+    .term-label {
+      padding: 0 14px 2px;
+      color: var(--quiet);
+    }
+
+    .term-row {
+      display: grid;
+      grid-template-columns: 14px 32px minmax(132px, 1fr) 108px 88px minmax(126px, 0.8fr);
+      align-items: center;
+      gap: 0;
+      padding: 1px 14px;
+      color: var(--muted);
+      white-space: nowrap;
+    }
+
+    .term-row.selected {
+      background: var(--green-wash);
+    }
+
+    .term-row span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .term-row .cursor,
+    .green-text {
+      color: var(--green);
+    }
+
+    .cyan-text {
+      color: var(--cyan);
+    }
+
+    .yellow-text {
+      color: var(--yellow);
+    }
+
+    .orange-text {
+      color: var(--orange);
+    }
+
+    .red-text {
+      color: var(--red);
+    }
+
+    .purple-text {
+      color: var(--purple);
+    }
+
+    .ink-text {
+      color: var(--ink);
+    }
+
+    .quiet-text {
+      color: var(--quiet);
+    }
+
+    .num {
+      text-align: right;
+      padding-right: 18px;
+    }
+
+    .confirm-card {
+      position: absolute;
+      left: 50%;
+      top: 52%;
+      width: min(82%, 540px);
+      transform: translate(-50%, -50%);
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      background: var(--panel-2);
+      padding: 16px 20px 15px;
+      animation: confirm-cycle 7s ease-in-out infinite;
+      transform-origin: 50% 48%;
+    }
+
+    .confirm-card h3 {
+      position: absolute;
+      top: -12px;
+      left: 14px;
+      padding-inline: 7px;
+      background: var(--panel-2);
+      color: var(--ink);
+      font-size: 12px;
+      font-weight: 640;
+    }
+
+    .confirm-card p {
+      margin: 0 0 11px;
+      color: var(--muted);
+    }
+
+    .confirm-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin-bottom: 11px;
+    }
+
+    .confirm-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 22px;
+      color: var(--text);
     }
 
     section {
-      padding: 76px 0;
+      padding: 72px 0;
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
     }
 
     .section-head {
       display: grid;
-      grid-template-columns: minmax(0, 0.72fr) minmax(280px, 0.5fr);
+      grid-template-columns: minmax(0, 0.76fr) minmax(300px, 0.48fr);
       gap: 28px;
       align-items: end;
-      margin-bottom: 28px;
-    }
-
-    h2 {
-      font-size: clamp(2rem, 4vw, 3.5rem);
+      margin-bottom: 30px;
     }
 
     .section-head p,
@@ -321,193 +557,447 @@
       text-wrap: pretty;
     }
 
+    .safety-head {
+      display: block;
+      max-width: 640px;
+      margin-bottom: 52px;
+    }
+
+    .safety-head h2 {
+      margin-bottom: 14px;
+      font-size: 40px;
+      letter-spacing: -0.035em;
+    }
+
+    .safety-head p {
+      font-size: 15px;
+      line-height: 1.65;
+    }
+
     .flow {
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 1px;
       border: 1px solid var(--line);
       border-radius: var(--radius);
       overflow: hidden;
-      background: var(--line);
+      background: var(--line-soft);
+      gap: 1px;
     }
 
     .flow-step {
-      padding: 24px;
-      background: var(--surface);
+      padding: 22px;
+      background: var(--panel);
     }
 
     .flow-step .mono {
-      color: var(--primary);
-      font-size: 13px;
+      color: var(--green);
+      font-size: 12px;
       font-weight: 700;
     }
 
     .flow-step h3 {
-      margin-top: 14px;
-      font-size: 1.25rem;
-      letter-spacing: -0.02em;
+      margin-top: 13px;
     }
 
     .flow-step p {
-      margin: 10px 0 0;
+      margin: 9px 0 0;
       color: var(--muted);
-      font-size: 15px;
+      font-size: 14px;
     }
 
-    .safety-panel {
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      overflow: hidden;
-      background: var(--surface);
-    }
-
-    .safety-row {
+    .safety-grid {
       display: grid;
-      grid-template-columns: 190px minmax(0, 1fr) 230px;
-      gap: 20px;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--bg-2);
+    }
+
+    .safety-card {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      padding: 28px 26px;
+      border-right: 1px solid rgba(255, 255, 255, 0.07);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+    }
+
+    .safety-card:nth-child(3n) {
+      border-right: 0;
+    }
+
+    .safety-card-head {
+      display: flex;
       align-items: center;
-      padding: 18px 20px;
-      border-bottom: 1px solid var(--line-soft);
+      justify-content: space-between;
+      gap: 18px;
+      margin-bottom: 24px;
     }
 
-    .safety-row:last-child {
-      border-bottom: 0;
+    .safety-card-label {
+      color: var(--green);
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
     }
 
-    .class-pill {
-      display: inline-flex;
-      width: fit-content;
-      border-radius: 999px;
-      padding: 5px 9px;
-      color: var(--bg);
-      font-size: 13px;
-      font-weight: 800;
+    .safety-card-label.warn {
+      color: var(--yellow);
+    }
+
+    .safety-card svg {
+      flex-shrink: 0;
+      opacity: 0.55;
+    }
+
+    .safety-card h3,
+    .safety-protected h3 {
+      margin: 0 0 10px;
+      color: var(--ink);
+      font-size: 21px;
+      font-weight: 760;
+      letter-spacing: -0.02em;
       line-height: 1.2;
     }
 
-    .pill-regenerable { background: var(--primary); }
-    .pill-reinstallable { background: var(--cyan); }
-    .pill-cache { background: oklch(0.77 0.13 188); }
-    .pill-browser { background: var(--accent); }
-    .pill-redundant { background: var(--green); }
-    .pill-unclassified { background: var(--warn); }
-    .pill-irreplaceable { background: var(--danger); color: var(--ink); }
-
-    .safety-row p {
+    .safety-card p,
+    .safety-protected p {
       margin: 0;
-      color: var(--muted);
+      color: var(--quiet);
+      font-size: 13.5px;
+      line-height: 1.68;
     }
 
-    .recovery {
-      color: var(--ink);
+    .safety-card > p {
+      flex: 1;
+      margin-bottom: 24px;
+    }
+
+    .safety-recovery {
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      padding-top: 14px;
+    }
+
+    .safety-recovery-label {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--faint);
+      font-size: 9.5px;
+      font-weight: 650;
+      letter-spacing: 0.1em;
+      line-height: 1.3;
+      text-transform: uppercase;
+    }
+
+    .safety-recovery-value {
+      display: block;
+      color: var(--text);
       font-size: 14px;
+      line-height: 1.45;
     }
 
-    .split {
+    .safety-protected {
+      grid-column: 1 / -1;
       display: grid;
-      grid-template-columns: minmax(0, 0.95fr) minmax(340px, 0.8fr);
-      gap: 28px;
-      align-items: stretch;
+      grid-template-columns: minmax(170px, 200px) minmax(0, 1fr) minmax(220px, 260px);
+      align-items: center;
+      padding: 28px 32px;
     }
 
-    .code-card,
-    .notes-card {
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      background: var(--surface);
-    }
-
-    .code-card {
-      padding: 22px;
+    .safety-protected-label {
       display: flex;
-      flex-direction: column;
-      justify-content: space-between;
-      gap: 24px;
+      align-items: center;
+      gap: 10px;
+      padding-right: 32px;
+      color: var(--red);
     }
 
-    .code-card pre {
+    .safety-protected-label span {
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .safety-protected-copy {
+      border-left: 1px solid rgba(255, 255, 255, 0.07);
+      padding: 0 48px 0 32px;
+    }
+
+    .safety-protected .safety-recovery {
+      min-width: 0;
+      border-top: 0;
+      border-left: 1px solid rgba(255, 255, 255, 0.07);
+      padding: 0 0 0 32px;
+    }
+
+    .install-grid {
+      display: block;
+      max-width: 760px;
+    }
+
+    .install-main {
+      overflow: hidden;
+    }
+
+    .install-copy {
+      margin-bottom: 32px;
+    }
+
+    .install-copy h2 {
+      margin-top: 10px;
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: -0.025em;
+    }
+
+    .install-copy p {
+      max-width: 72ch;
+      margin-top: 12px;
+      font-size: 15px;
+      line-height: 1.65;
+    }
+
+    .install-copy code,
+    .details-row code {
+      border-radius: 3px;
+      padding: 2px 6px;
+      background: var(--panel);
+      color: #adbac7;
+      font-size: 0.87em;
+    }
+
+    .code-window {
+      overflow: hidden;
+      margin-bottom: 20px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--bg-2);
+    }
+
+    .code-window .terminal-bar {
+      justify-content: space-between;
+    }
+
+    .terminal-dots {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .code-window pre {
       margin: 0;
       overflow-x: auto;
-      border-radius: 8px;
-      padding: 18px;
-      color: var(--primary);
-      background: oklch(0.06 0 0);
-      border: 1px solid var(--line-soft);
-      font-size: 15px;
-    }
-
-    .notes-card {
-      padding: 22px;
-    }
-
-    .notes-card h3 {
-      font-size: 1.25rem;
-      letter-spacing: -0.02em;
-    }
-
-    .notes-list {
-      margin: 18px 0 0;
-      padding: 0;
-      list-style: none;
-      display: grid;
-      gap: 14px;
-    }
-
-    .notes-list li {
-      border-top: 1px solid var(--line-soft);
-      padding-top: 14px;
-      color: var(--muted);
-    }
-
-    .notes-list strong {
+      padding: 20px 24px;
       color: var(--ink);
+      font-size: 14px;
+      line-height: 1.55;
+      white-space: pre-wrap;
     }
 
-    .links {
+    .prompt {
+      color: var(--quiet);
+    }
+
+    .link-row {
       display: flex;
       flex-wrap: wrap;
-      gap: 12px;
-      margin-top: 22px;
+      gap: 8px;
+      margin-bottom: 44px;
     }
 
-    .links a {
+    .link-row a,
+    .footer-links a {
       border: 1px solid var(--line);
-      border-radius: 999px;
-      padding: 8px 12px;
-      color: var(--ink);
+      border-radius: 6px;
+      padding: 7px 11px;
+      background: var(--bg-2);
+      color: var(--muted);
       text-decoration: none;
-      background: var(--surface);
+      font-size: 13px;
+    }
+
+    .link-row a:hover,
+    .footer-links a:hover {
+      color: var(--ink);
+      border-color: var(--quiet);
+    }
+
+    .details-panel {
+      overflow: hidden;
+      border: 1px solid var(--line-soft);
+      border-radius: 10px;
+      background: transparent;
+    }
+
+    .details-row {
+      display: flex;
+      align-items: flex-start;
+      gap: 14px;
+      padding: 16px 22px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .details-row:last-child {
+      border-bottom: 0;
+    }
+
+    .details-row .mark {
+      color: var(--green);
+      flex-shrink: 0;
+      margin-top: 3px;
+      font-size: 11px;
+      line-height: 1.4;
+    }
+
+    .details-row strong {
+      display: block;
+      color: var(--ink);
+      font-size: 13.5px;
+      font-weight: 500;
+    }
+
+    .details-row p {
+      margin: 3px 0 0;
+      color: var(--quiet);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .faq-list {
+      max-width: 760px;
+      margin: 0 auto;
+      overflow: hidden;
+      border: 1px solid var(--line-soft);
+      border-radius: 10px;
+      background: var(--bg-2);
+    }
+
+    .faq-head {
+      display: block;
+      max-width: 760px;
+      margin-inline: auto;
+      margin-bottom: 34px;
+    }
+
+    .faq-head h2 {
+      margin-bottom: 12px;
+      font-size: 28px;
+      font-weight: 700;
+      letter-spacing: -0.025em;
+    }
+
+    .faq-head p {
+      max-width: 62ch;
+      font-size: 15px;
+      line-height: 1.65;
+    }
+
+    details {
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      background: transparent;
+      transition: background-color 160ms ease, border-color 160ms ease;
+    }
+
+    details:hover,
+    details[open] {
+      background: rgba(255, 255, 255, 0.025);
+    }
+
+    details:last-child {
+      border-bottom: 0;
+    }
+
+    summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 18px 22px;
+      color: var(--ink);
+      cursor: pointer;
+      font-size: 14.5px;
+      font-weight: 600;
+      line-height: 1.45;
+      list-style: none;
+    }
+
+    summary:focus-visible {
+      outline: 2px solid rgba(63, 185, 80, 0.72);
+      outline-offset: -2px;
+    }
+
+    summary::-webkit-details-marker {
+      display: none;
+    }
+
+    summary::after {
+      content: "+";
+      color: var(--green);
+      font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-weight: 700;
+      line-height: 1;
+    }
+
+    details[open] summary::after {
+      content: "-";
+    }
+
+    details p {
+      margin: 0;
+      max-width: 68ch;
+      padding: 0 54px 20px 22px;
+      color: var(--muted);
       font-size: 14px;
+      line-height: 1.72;
+      text-wrap: pretty;
+    }
+
+    details code {
+      border-radius: 3px;
+      padding: 2px 5px;
+      background: var(--panel-3);
+      color: #adbac7;
+      font-size: 0.9em;
     }
 
     .site-footer {
       border-top: 1px solid var(--line);
-      padding: 30px 0;
-      color: var(--muted);
-      font-size: 14px;
+      padding: 28px 0;
+      color: var(--quiet);
+      font-size: 13px;
     }
 
     .footer-grid {
       display: flex;
+      align-items: center;
       justify-content: space-between;
-      gap: 20px;
       flex-wrap: wrap;
+      gap: 18px;
+    }
+
+    .footer-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
     }
 
     .toast {
       position: fixed;
       right: 20px;
       bottom: 20px;
+      z-index: 20;
       border: 1px solid var(--line);
-      border-radius: 999px;
-      padding: 10px 14px;
+      border-radius: 6px;
+      padding: 10px 13px;
       color: var(--ink);
-      background: var(--surface-2);
+      background: var(--panel-3);
       opacity: 0;
-      transform: translateY(10px);
+      transform: translateY(8px);
       transition: opacity 180ms ease, transform 180ms ease;
       pointer-events: none;
-      z-index: 20;
     }
 
     .toast[data-visible="true"] {
@@ -515,73 +1005,200 @@
       transform: translateY(0);
     }
 
-    @media (max-width: 960px) {
+    @keyframes hero-copy-in {
+      from {
+        opacity: 0;
+        transform: translateY(14px);
+        filter: blur(4px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+        filter: blur(0);
+      }
+    }
+
+    @keyframes confirm-cycle {
+      0%,
+      42% {
+        opacity: 0;
+        transform: translate(-50%, -50%) scale(0.985);
+        filter: blur(3px);
+      }
+      50%,
+      92% {
+        opacity: 1;
+        transform: translate(-50%, -50%) scale(1);
+        filter: blur(0);
+      }
+      100% {
+        opacity: 0;
+        transform: translate(-50%, -50%) scale(0.985);
+        filter: blur(3px);
+      }
+    }
+
+    .hero-copy > *,
+    .hero-art {
+      animation: hero-copy-in 620ms cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+
+    .hero-copy > :nth-child(2) { animation-delay: 70ms; }
+    .hero-copy > :nth-child(3) { animation-delay: 130ms; }
+    .hero-copy > :nth-child(4) { animation-delay: 190ms; }
+    .hero-copy > :nth-child(5) { animation-delay: 250ms; }
+    .hero-copy > :nth-child(6) { animation-delay: 310ms; }
+    .hero-art {
+      animation: hero-copy-in 720ms 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+
+    @media (max-width: 1000px) {
       .hero-grid,
       .section-head,
-      .split {
+      .install-grid {
         grid-template-columns: 1fr;
       }
 
       .hero {
-        padding-top: 48px;
-      }
-
-      h1 {
-        max-width: 11ch;
+        padding-top: 52px;
       }
 
       .flow {
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
 
-      .safety-row {
+      .safety-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .safety-card:nth-child(3n) {
+        border-right: 1px solid rgba(255, 255, 255, 0.07);
+      }
+
+      .safety-card:nth-child(2n) {
+        border-right: 0;
+      }
+
+      .safety-protected {
         grid-template-columns: 1fr;
-        gap: 10px;
+        gap: 20px;
+      }
+
+      .safety-protected-label,
+      .safety-protected-copy,
+      .safety-protected .safety-recovery {
+        border-left: 0;
+        padding: 0;
       }
     }
 
-    @media (max-width: 680px) {
+    @media (max-width: 720px) {
       .wrap {
-        max-width: 390px;
-        margin-left: 0;
-        margin-right: auto;
-        padding-inline: 14px;
+        width: calc(100% - 28px);
+        padding-inline: 0;
       }
 
       .nav {
+        min-height: auto;
         align-items: flex-start;
         flex-direction: column;
-        padding: 14px 0;
-        gap: 12px;
+        padding: 13px 0;
+        gap: 11px;
       }
 
       .nav-links {
         width: 100%;
         overflow-x: auto;
+        padding-left: 1px;
         padding-bottom: 2px;
       }
 
-      .hero-media {
+      .hero {
+        padding-inline: 28px;
+        padding-bottom: 58px;
+      }
+
+      .terminal {
         margin-inline: -8px;
-        border-radius: 10px;
-        padding: 4px;
+        border-radius: 8px;
+      }
+
+      .terminal-screen {
+        font-size: 11px;
+      }
+
+      .term-status,
+      .term-footer,
+      .term-command {
+        overflow-x: auto;
+      }
+
+      .term-row {
+        grid-template-columns: 14px 28px 130px 88px 72px 116px;
+        width: 560px;
+      }
+
+      .term-list {
+        overflow-x: auto;
+      }
+
+      .confirm-card {
+        width: calc(100% - 26px);
       }
 
       .flow {
         grid-template-columns: 1fr;
       }
 
-      .copy-command {
-        width: 100%;
-        justify-content: flex-start;
+      .actions {
+        align-items: center;
       }
 
-      .copy-command code {
-        max-width: calc(100vw - 112px);
+      .hero-copy {
+        width: 100%;
+        max-width: 100%;
+      }
+
+      .safety-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .faq-head {
+        margin-bottom: 24px;
+      }
+
+      summary {
+        align-items: flex-start;
+        padding: 17px 16px;
+      }
+
+      details p {
+        padding: 0 16px 18px;
+      }
+
+      .safety-card,
+      .safety-card:nth-child(3n),
+      .safety-card:nth-child(2n) {
+        border-right: 0;
       }
 
       section {
         padding: 56px 0;
+      }
+
+      .copy-command {
+        width: auto;
+        justify-content: center;
+      }
+
+      .lede,
+      .warning {
+        max-width: 31ch;
+      }
+
+      .command-text {
+        flex: 1;
+        max-width: none;
       }
     }
 
@@ -597,6 +1214,19 @@
         animation-duration: 0.001ms !important;
         animation-iteration-count: 1 !important;
       }
+
+      .hero-copy > *,
+      .hero-art,
+      .hero-art::before,
+      .confirm-card {
+        animation: none !important;
+        opacity: 1;
+        filter: none;
+      }
+
+      .confirm-card {
+        transform: translate(-50%, -50%);
+      }
     }
   </style>
 </head>
@@ -604,13 +1234,14 @@
   <header class="site-header">
     <nav class="wrap nav" aria-label="Main navigation">
       <a class="brand" href="#top" aria-label="macclean home">
-        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-mark" aria-hidden="true">m</span>
         <span>macclean</span>
       </a>
       <div class="nav-links">
         <a href="#flow">Flow</a>
         <a href="#safety">Safety Classes</a>
         <a href="#install">Install</a>
+        <a href="#faq">FAQ</a>
         <a href="https://github.com/Ez4T/macclean">GitHub</a>
       </div>
     </nav>
@@ -619,32 +1250,94 @@
   <main id="top">
     <section class="hero">
       <div class="wrap hero-grid">
-        <div>
-          <span class="version">v0.2.0 source-available macOS TUI</span>
-          <h1>Classify disk usage before you Reclaim it.</h1>
+        <div class="hero-copy">
+          <div class="hero-badges">
+            <span class="tag mono">v0.3.1</span>
+            <span class="tag secondary">macOS TUI</span>
+            <span class="tag secondary">source-available</span>
+          </div>
+          <h1>Classify disk usage<br>before you <span class="accent">Reclaim</span> it.</h1>
           <p class="lede">
-            macclean scans your Mac, groups each Item by Safety Class, shows the Evidence behind the label, and waits for an explicit Confirm before anything is Reclaimed.
+            macclean scans your Mac, groups each item by Safety Class, shows the evidence behind the label, and waits for an explicit confirm before anything is deleted.
           </p>
           <div class="actions">
-            <a class="button" href="#install">Install macclean</a>
+            <span class="prompt mono" aria-hidden="true">$</span>
+            <span class="command-text mono">curl -fsSL https://macclean.commaco.tech/install.sh | sh</span>
             <button class="copy-command" type="button" data-copy="curl -fsSL https://macclean.commaco.tech/install.sh | sh">
-              <code>curl -fsSL https://macclean.commaco.tech/install.sh | sh</code>
-              <span aria-hidden="true">copy</span>
+              copy
             </button>
           </div>
           <ul class="microfacts" aria-label="Project facts">
             <li>Runs locally</li>
             <li>No telemetry</li>
-            <li>No sudo install</li>
-            <li>Explicit Confirm gate</li>
+            <li>No sudo</li>
+            <li>Explicit confirm</li>
           </ul>
           <p class="warning">
-            Warning: macclean Reclaims space by deleting files. It is a personal research project, provided as-is with no warranty, no support, and no liability accepted by the author.
+            Personal research project, provided as-is. Reclaims space by deleting files. No warranty, no support.
           </p>
         </div>
-        <figure class="hero-media">
-          <img src="assets/macclean-tui.png" width="1120" height="700" alt="macclean terminal UI showing Safety Class groups with Regenerable and Reinstallable reclaimable, Browser Cache and Unclassified needing override, and Irreplaceable marked Protected.">
-        </figure>
+
+        <div class="hero-art">
+          <div class="terminal" aria-label="macclean terminal user interface preview">
+            <div class="terminal-bar">
+              <span class="dot red" aria-hidden="true"></span>
+              <span class="dot yellow" aria-hidden="true"></span>
+              <span class="dot green" aria-hidden="true"></span>
+              <span class="terminal-title mono">macclean</span>
+            </div>
+            <div class="terminal-screen mono">
+              <div class="term-status">
+                <span class="ink-text">/Users/johnsnow</span>
+                <span class="quiet-text">.</span>
+                <span class="green-text">reclaimable now: 30.4G</span>
+                <span class="term-spacer"></span>
+                <span class="green-text">Selected: 14 Items . 5.8G</span>
+                <span class="term-spacer"></span>
+                <span class="quiet-text">v0.3.1</span>
+              </div>
+              <div class="term-list">
+                <div class="term-label">  Groups</div>
+                <div class="term-row selected">
+                  <span class="cursor">&gt;</span><span>[x]</span><span class="ink-text">Regenerable</span><span class="num">5.8G total</span><span class="num">14 Items</span><span class="green-text">5.8G reclaimable</span>
+                </div>
+                <div class="term-row">
+                  <span></span><span>[ ]</span><span class="cyan-text">Reinstallable</span><span class="num">16.0G total</span><span class="num">7758 Items</span><span class="cyan-text">16.0G reclaimable</span>
+                </div>
+                <div class="term-row">
+                  <span></span><span>[ ]</span><span class="cyan-text">Cache</span><span class="num">8.6G total</span><span class="num">4 Items</span><span class="cyan-text">8.6G reclaimable</span>
+                </div>
+                <div class="term-row">
+                  <span></span><span></span><span class="orange-text">  Browser Cache</span><span class="num">2.0G total</span><span class="num">3 Items</span><span class="orange-text">needs override</span>
+                </div>
+                <div class="term-row">
+                  <span></span><span></span><span class="yellow-text">  Unclassified</span><span class="num">63.7G total</span><span class="num">72 Items</span><span class="yellow-text">needs override</span>
+                </div>
+                <div class="term-row">
+                  <span></span><span></span><span class="red-text">  Irreplaceable</span><span class="num">56.0G total</span><span class="num">4 Items</span><span class="red-text">Protected</span>
+                </div>
+
+                <div class="confirm-card">
+                  <h3>Confirm Selection Reclaim</h3>
+                  <p>Reclaim <span class="ink-text">5.8G</span> from <span class="ink-text">14 selected Items</span></p>
+                  <div class="confirm-meta">
+                    <span class="green-text">Regenerable</span>
+                    <span>14 Items</span>
+                    <span>5.8G</span>
+                    <span class="quiet-text">Recovery: rebuild after Reclaim</span>
+                  </div>
+                  <p>After Confirm, reclaim runs one Item at a time. You can stop before the next Item while it runs.</p>
+                  <div class="confirm-actions">
+                    <span><span class="green-text">[y]</span> Reclaim selection</span>
+                    <span><span class="red-text">[N]</span> cancel</span>
+                  </div>
+                </div>
+              </div>
+              <div class="term-footer">Group: <span class="green-text">Regenerable</span> . 14 Items . 5.8G reclaimable . Recovery: rebuild after Reclaim</div>
+              <div class="term-command">Selected 14 Items . 5.8G . press c to Reclaim the selection.</div>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -681,108 +1374,246 @@
 
     <section id="safety">
       <div class="wrap">
-        <div class="section-head">
-          <h2>Seven Safety Classes, one conservative default.</h2>
-          <p>Only Regenerable, Reinstallable, Cache, and Redundant Copy are offered for Reclaim by default. Browser Cache and Unclassified require override. Irreplaceable is Protected.</p>
+        <div class="section-head safety-head">
+          <h2>Safety Class Hierarchy</h2>
+          <p>macclean sorts disk usage by recoverability before size. Default Reclaim stays limited to classes with a clear Recovery Method, uncertain paths require override, and real data stays Protected.</p>
         </div>
-        <div class="safety-panel" role="table" aria-label="Safety Classes">
-          <div class="safety-row" role="row">
-            <span class="class-pill pill-regenerable" role="cell">Regenerable</span>
-            <p role="cell">Build output such as Rust `target/`, Flutter `build/`, or Next.js `.next/`.</p>
-            <span class="recovery mono" role="cell">Recovery: rebuild</span>
-          </div>
-          <div class="safety-row" role="row">
-            <span class="class-pill pill-reinstallable" role="cell">Reinstallable</span>
-            <p role="cell">Dependency trees such as `node_modules` that a package manager restores.</p>
-            <span class="recovery mono" role="cell">Recovery: reinstall</span>
-          </div>
-          <div class="safety-row" role="row">
-            <span class="class-pill pill-cache" role="cell">Cache</span>
-            <p role="cell">Tool caches that refill automatically on next use.</p>
-            <span class="recovery mono" role="cell">Recovery: auto-refill</span>
-          </div>
-          <div class="safety-row" role="row">
-            <span class="class-pill pill-browser" role="cell">Browser Cache</span>
-            <p role="cell">Browser cache directories. Rebuildable, but clearing them has a real browsing cost.</p>
-            <span class="recovery mono" role="cell">Override required</span>
-          </div>
-          <div class="safety-row" role="row">
-            <span class="class-pill pill-redundant" role="cell">Redundant Copy</span>
-            <p role="cell">A byte-identical duplicate confirmed by checksum, with the surviving copy preserved.</p>
-            <span class="recovery mono" role="cell">Recovery: original copy</span>
-          </div>
-          <div class="safety-row" role="row">
-            <span class="class-pill pill-unclassified" role="cell">Unclassified</span>
-            <p role="cell">Large Items the Ruleset cannot prove recoverable. Surfaced for awareness, not auto-offered.</p>
-            <span class="recovery mono" role="cell">Override required</span>
-          </div>
-          <div class="safety-row" role="row">
-            <span class="class-pill pill-irreplaceable" role="cell">Irreplaceable</span>
-            <p role="cell">Databases, VM volumes, documents, and other real data that should not be deleted by the tool.</p>
-            <span class="recovery mono" role="cell">Protected</span>
-          </div>
+        <div class="safety-grid" aria-label="Safety Classes">
+          <article class="safety-card">
+            <div class="safety-card-head">
+              <span class="safety-card-label mono">Regenerable</span>
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <polyline points="23 4 23 10 17 10"></polyline>
+                <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+              </svg>
+            </div>
+            <h3>Build Artifacts</h3>
+            <p>Build output such as Rust <code>target/</code>, Flutter <code>build/</code>, or Next.js <code>.next/</code>. Safely cleared and rebuilt on demand.</p>
+            <div class="safety-recovery">
+              <span class="safety-recovery-label mono">Recovery Method</span>
+              <span class="safety-recovery-value">cargo build / make</span>
+            </div>
+          </article>
+
+          <article class="safety-card">
+            <div class="safety-card-head">
+              <span class="safety-card-label mono">Reinstallable</span>
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+              </svg>
+            </div>
+            <h3>Package Data</h3>
+            <p>Dependency trees and managed binaries restored by package managers such as npm, Homebrew, Nix, or Cargo.</p>
+            <div class="safety-recovery">
+              <span class="safety-recovery-label mono">Recovery Method</span>
+              <span class="safety-recovery-value">reinstall dependencies</span>
+            </div>
+          </article>
+
+          <article class="safety-card">
+            <div class="safety-card-head">
+              <span class="safety-card-label mono">Cache</span>
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+              </svg>
+            </div>
+            <h3>Transient Data</h3>
+            <p>Application-level caches, tool caches, and temporary buffers that refill automatically on next use.</p>
+            <div class="safety-recovery">
+              <span class="safety-recovery-label mono">Recovery Method</span>
+              <span class="safety-recovery-value">automatic background refill</span>
+            </div>
+          </article>
+
+          <article class="safety-card">
+            <div class="safety-card-head">
+              <span class="safety-card-label mono">Redundant</span>
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+              </svg>
+            </div>
+            <h3>Deduplicated Files</h3>
+            <p>A byte-identical duplicate confirmed by checksum, with the surviving original copy preserved elsewhere.</p>
+            <div class="safety-recovery">
+              <span class="safety-recovery-label mono">Recovery Method</span>
+              <span class="safety-recovery-value">original copy preserved</span>
+            </div>
+          </article>
+
+          <article class="safety-card">
+            <div class="safety-card-head">
+              <span class="safety-card-label warn mono">Browser Cache</span>
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="var(--yellow)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="2" y1="12" x2="22" y2="12"></line>
+                <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path>
+              </svg>
+            </div>
+            <h3>Browser State</h3>
+            <p>Browser cache directories. Rebuildable on next visit, but clearing them has a noticeable browsing cost.</p>
+            <div class="safety-recovery">
+              <span class="safety-recovery-label mono">Recovery Method</span>
+              <span class="safety-recovery-value">browser refetch on next visit</span>
+            </div>
+          </article>
+
+          <article class="safety-card">
+            <div class="safety-card-head">
+              <span class="safety-card-label warn mono">Unclassified</span>
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="var(--yellow)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+                <line x1="12" y1="9" x2="12" y2="13"></line>
+                <line x1="12" y1="17" x2="12.01" y2="17"></line>
+              </svg>
+            </div>
+            <h3>Unknown Territory</h3>
+            <p>Large Items the Ruleset cannot prove recoverable. Surfaced for awareness, not auto-offered for reclaim.</p>
+            <div class="safety-recovery">
+              <span class="safety-recovery-label mono">Recovery Method</span>
+              <span class="safety-recovery-value">user manual override only</span>
+            </div>
+          </article>
+
+          <article class="safety-protected">
+            <div class="safety-protected-label">
+              <span class="mono">Irreplaceable</span>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+                <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+              </svg>
+            </div>
+            <div class="safety-protected-copy">
+              <h3>Protected Documents</h3>
+              <p>Databases, VM volumes, documents, and other real data. These are never offered for deletion.</p>
+            </div>
+            <div class="safety-recovery">
+              <span class="safety-recovery-label mono">Recovery Method</span>
+              <span class="safety-recovery-value">none - immutable state</span>
+            </div>
+          </article>
         </div>
       </div>
     </section>
 
     <section id="install">
-      <div class="wrap split">
-        <article class="code-card">
-          <div>
+      <div class="wrap install-grid">
+        <article class="install-main">
+          <div class="install-copy">
+            <span class="tag">Get started</span>
             <h2>Install with one command.</h2>
-            <p class="section-copy">The installer fetches the latest universal macOS binary from GitHub Releases, verifies its SHA-256 checksum, installs to `~/.local/bin`, and updates `~/.zshrc` when needed.</p>
+            <p class="section-copy">The installer fetches the latest universal macOS binary from GitHub Releases, verifies its SHA-256 checksum, installs to <code>~/.local/bin</code>, and updates <code>~/.zshrc</code> when needed.</p>
           </div>
-          <pre><code>curl -fsSL https://macclean.commaco.tech/install.sh | sh</code></pre>
-          <div class="links">
+          <div class="code-window">
+            <div class="terminal-bar">
+              <span class="terminal-dots" aria-hidden="true">
+                <span class="dot red"></span>
+                <span class="dot yellow"></span>
+                <span class="dot green"></span>
+              </span>
+              <button class="copy-command mono" type="button" data-copy="curl -fsSL https://macclean.commaco.tech/install.sh | sh">copy</button>
+            </div>
+            <pre><code><span class="prompt">$</span> curl -fsSL https://macclean.commaco.tech/install.sh | sh</code></pre>
+          </div>
+          <div class="link-row">
             <a href="install.sh">Read install.sh</a>
             <a href="https://github.com/Ez4T/macclean/releases/latest">Latest release</a>
             <a href="https://github.com/Ez4T/macclean">Build from source</a>
           </div>
         </article>
 
-        <aside class="notes-card">
-          <h3>Project details</h3>
-          <ul class="notes-list">
-            <li><strong>Local by default.</strong> Normal Scan and TUI runs make no network calls and collect no telemetry.</li>
-            <li><strong>Unsigned binary.</strong> The public path is the curl installer. Browser downloads are deliberately not the advertised install route.</li>
-            <li><strong>Source-available license.</strong> PolyForm Noncommercial 1.0.0 permits non-commercial use, study, modification, and sharing.</li>
-            <li><strong>Ruleset is data-driven.</strong> Add custom TOML rules at `~/.config/macclean/rules.toml`.</li>
-          </ul>
-          <div class="links">
-            <a href="https://github.com/Ez4T/macclean/blob/main/README.md">README</a>
-            <a href="https://github.com/Ez4T/macclean/blob/main/CONTEXT.md">Vocabulary</a>
-            <a href="adr/0007-public-install-via-curl-sh.md">Install ADR</a>
-            <a href="https://github.com/Ez4T/macclean/blob/main/LICENSE">License</a>
+        <aside class="details-panel" aria-label="Project details">
+          <div class="details-row">
+            <span class="mark mono" aria-hidden="true">+</span>
+            <div><strong>Local by default</strong><p>Normal Scan and TUI runs make no network calls and collect no telemetry.</p></div>
+          </div>
+          <div class="details-row">
+            <span class="mark mono" aria-hidden="true">+</span>
+            <div><strong>Unsigned binary</strong><p>The public path is the curl installer. Browser downloads are deliberately not the advertised install route.</p></div>
+          </div>
+          <div class="details-row">
+            <span class="mark mono" aria-hidden="true">+</span>
+            <div><strong>Source-available</strong><p>PolyForm Noncommercial 1.0.0 permits non-commercial use, study, modification, and sharing.</p></div>
+          </div>
+          <div class="details-row">
+            <span class="mark mono" aria-hidden="true">+</span>
+            <div><strong>Ruleset is data-driven</strong><p>Add custom TOML rules at <code>~/.config/macclean/rules.toml</code>.</p></div>
           </div>
         </aside>
+      </div>
+    </section>
+
+    <section id="faq">
+      <div class="wrap">
+        <div class="section-head faq-head">
+          <h2>Common questions.</h2>
+          <p>The short version: macclean is local, conservative, and explicit about anything that deletes files.</p>
+        </div>
+        <div class="faq-list">
+          <details>
+            <summary>Does macclean delete anything automatically?</summary>
+            <p>No. Every Reclaim action requires an explicit Confirm step. Protected classes are never offered for deletion.</p>
+          </details>
+          <details>
+            <summary>Does it send data anywhere?</summary>
+            <p>No. macclean runs entirely locally. Normal Scan and TUI runs make zero network calls and collect no telemetry.</p>
+          </details>
+          <details>
+            <summary>Why does it need sudo to install?</summary>
+            <p>It does not. The installer puts the binary in <code>~/.local/bin</code> and updates <code>~/.zshrc</code>. No system directories are touched.</p>
+          </details>
+          <details>
+            <summary>Can I add custom rules?</summary>
+            <p>Yes. Add TOML rules at <code>~/.config/macclean/rules.toml</code>. The ruleset is data-driven.</p>
+          </details>
+          <details>
+            <summary>What happens if a path does not match any rule?</summary>
+            <p>Unknown paths fail safe to Unclassified. They are surfaced for awareness, but an explicit override is required before Reclaim.</p>
+          </details>
+        </div>
       </div>
     </section>
   </main>
 
   <footer class="site-footer">
     <div class="wrap footer-grid">
-      <span>macclean is a personal research project by Tanarat.</span>
-      <span>No warranty. No support. Non-commercial use only.</span>
+      <span>macclean is a personal research project by Tanarat. No warranty. No support. Non-commercial use only.</span>
+      <div class="footer-links">
+        <a href="https://github.com/Ez4T/macclean/blob/main/README.md">README</a>
+        <a href="https://github.com/Ez4T/macclean/blob/main/CONTEXT.md">Vocabulary</a>
+        <a href="adr/0007-public-install-via-curl-sh.md">Install ADR</a>
+        <a href="https://github.com/Ez4T/macclean/blob/main/LICENSE">License</a>
+      </div>
     </div>
   </footer>
 
   <div class="toast" role="status" aria-live="polite">Install command copied</div>
 
   <script>
-    const copyButton = document.querySelector("[data-copy]");
+    const copyButtons = document.querySelectorAll("[data-copy]");
     const toast = document.querySelector(".toast");
 
-    copyButton?.addEventListener("click", async () => {
-      const text = copyButton.getAttribute("data-copy");
-      try {
-        await navigator.clipboard.writeText(text);
-        toast.dataset.visible = "true";
-        window.setTimeout(() => {
-          toast.dataset.visible = "false";
-        }, 1800);
-      } catch {
-        window.prompt("Copy the install command:", text);
-      }
+    copyButtons.forEach((copyButton) => {
+      copyButton.addEventListener("click", async () => {
+        const text = copyButton.getAttribute("data-copy");
+        try {
+          await navigator.clipboard.writeText(text);
+          if (copyButton.textContent.trim() === "copy") {
+            copyButton.textContent = "copied";
+            window.setTimeout(() => {
+              copyButton.textContent = "copy";
+            }, 1800);
+          }
+          toast.dataset.visible = "true";
+          window.setTimeout(() => {
+            toast.dataset.visible = "false";
+          }, 1800);
+        } catch {
+          window.prompt("Copy the install command:", text);
+        }
+      });
     });
   </script>
 </body>
