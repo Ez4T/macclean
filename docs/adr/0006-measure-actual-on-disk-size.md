@@ -53,16 +53,38 @@ returns 0 on APFS, where step 2 above (`fast_tree_bytes`, the rule-free
 allocated-block walk) supplies the size as already documented. Both paths derive
 size from real allocated blocks, never from an unrelated attribute.
 
-## Known limitation: APFS clones are still counted at full size
+## APFS clones are sized by their private (freeable) bytes (issue #47)
 
-Allocated-block sizing reports each APFS clone at its full logical allocation even
-though clones share underlying blocks via copy-on-write, so a tool that
-`clonefile(2)`s a project per workspace still over-reports the truly-freeable
-bytes. The correct primitive is `getattrlistat(ATTR_CMNEXT_PRIVATESIZE)`, which
-returns the bytes unique to a file — but it is a *per-file* attribute, and summing
-it across a matched subtree reintroduces exactly the `O(N_files)` syscall cost the
-matched-dir exception was created to avoid. Clone-accurate per-item sizing
-therefore trades directly against scan performance, is tracked as a follow-up, and
-will amend this ADR when that tradeoff is decided. The `.treehouse` Rule (issue
-#43) mitigates the most common source by collapsing Treehouse's per-PR workspaces
-into one Item rather than thousands.
+Regular files are sized by the bytes **unique** to them — what deleting the file
+actually frees — via `getattrlistat(ATTR_CMNEXT_PRIVATESIZE)` (forkattr `0x8`,
+requested with `FSOPT_ATTR_CMN_EXTENDED | FSOPT_NOFOLLOW`). APFS clones share
+underlying blocks via copy-on-write, so allocated-block sizing reported each clone
+at its full logical allocation and a tool that `clonefile(2)`s a project per
+workspace over-reported the truly-freeable bytes. Private-size sizing removes that
+over-count.
+
+**Why this didn't reintroduce the `O(N_files)` cost the matched-dir exception
+avoids (issue #41):** that exception avoids `O(N_files × N_rules)` *rule matching*,
+not the per-file stat. On APFS the scan already does one `fstatat` per file in both
+the main walk and the matched-dir fallback (`ATTR_DIR_ALLOCSIZE` returns 0 on APFS,
+and HFS+ — where the single-syscall path fires — has no `clonefile`). Clone
+accuracy is therefore an extra single syscall per regular file, which is cheap and
+fully parallel; a `$HOME` scan stays well within budget. No clone-heaviness gate is
+needed, and both sizing paths share one helper (`entry_on_disk_bytes`).
+
+**Graceful fallback, never a regression:** when `PRIVATESIZE` is unavailable (older
+macOS, non-APFS, error) the entry falls back to its allocated-block size — exactly
+today's number. A legitimate private size of `0` (a fully-shared clone) is kept,
+distinguished from an absent attribute via the result buffer's length word, so such
+files are not silently re-inflated to full allocation.
+
+**Accepted limitation — safe under-count:** `PRIVATESIZE` is a per-file attribute,
+so summing it over a subtree under-counts when two clones *inside the same subtree*
+share blocks (those blocks are private to neither file, yet deleting the whole
+subtree frees them). Under-counting is the safe direction for a tool that must
+never overstate what reclaiming frees, so we accept it rather than tracking
+`CLONEID` reference sets across the subtree. Blocks shared with a clone *outside*
+the subtree are correctly excluded (deleting the subtree would not free them).
+
+The `.treehouse` Rule (issue #43) additionally collapses Treehouse's per-PR
+workspaces into one Item rather than thousands.
