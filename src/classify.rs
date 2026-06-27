@@ -360,7 +360,7 @@ fn read_child_entries(
                     path: child_path,
                     depth: child_depth,
                     is_dir,
-                    bytes: stat_on_disk_bytes(&stat),
+                    bytes: entry_on_disk_bytes(raw_fd, &name, &stat),
                     rule_idx,
                 },
                 name,
@@ -441,15 +441,49 @@ fn walk_child_entries(
 /// current Unix timestamp (~1.7 GiB) as its size and the reclaimable total
 /// ballooned to impossible figures (issue #43).
 fn getattrlist_total_size(parent_fd: RawFd, name: &CStr) -> Option<u64> {
-    getattrlistat_single_size(parent_fd, name, 0, 0x0000_0008)
+    // dirattr = ATTR_DIR_ALLOCSIZE (0x8). A directory with no recursive size
+    // returns 0 here (APFS), which we treat as "unavailable" so the caller falls
+    // back to the rule-free walk — hence the `n > 0` filter.
+    getattrlistat_off_t(parent_fd, name, 0, 0x0000_0008, 0, 0, 0)
+        .and_then(|n| u64::try_from(n).ok())
+        .filter(|&n| n > 0)
 }
 
-fn getattrlistat_single_size(
-    parent_fd: RawFd,
-    name:      &CStr,
+/// Bytes unique to a single file via `getattrlistat(ATTR_CMNEXT_PRIVATESIZE)`
+/// (forkattr 0x8) — what deleting the file would actually free, excluding blocks
+/// shared with APFS clones via copy-on-write (issue #47). Returns `None` when the
+/// attribute is unavailable (older macOS, non-APFS, error) so the caller falls
+/// back to allocated-block sizing and never regresses below today's behaviour.
+///
+/// A legitimate private size of 0 (a fully-shared clone, every block referenced
+/// by another file) is distinguished from an absent attribute via the buffer's
+/// leading length word, so such a file is correctly sized at ~0 rather than
+/// falling back to its full allocation.
+fn getattrlistat_private_size(parent_fd: RawFd, name: &CStr) -> Option<u64> {
+    // Options: FSOPT_ATTR_CMN_EXTENDED (0x20) is *required* for the forkattr
+    // field to be read as extended common attributes (ATTR_CMNEXT_*) — without it
+    // getattrlistat rejects the request with EINVAL. FSOPT_NOFOLLOW (0x1) never
+    // traverses a symlink swapped in under us; we only call this for entries
+    // already known to be regular files, but it costs nothing and closes the
+    // TOCTOU gap.
+    getattrlistat_off_t(parent_fd, name, 0, 0, 0, 0x0000_0008, 0x0000_0021)
+        .and_then(|n| u64::try_from(n).ok())
+}
+
+/// One `getattrlistat` requesting a single `off_t` attribute. Returns the value
+/// only when the attribute was actually populated — determined from the buffer's
+/// leading length word, so a real 0 is kept and an absent attribute yields
+/// `None`. `commonattr`/`dirattr`/`fileattr`/`forkattr` select the one attribute;
+/// `options` is the `getattrlist` option mask (e.g. `FSOPT_NOFOLLOW`).
+fn getattrlistat_off_t(
+    parent_fd:  RawFd,
+    name:       &CStr,
     commonattr: u32,
     dirattr:    u32,
-) -> Option<u64> {
+    fileattr:   u32,
+    forkattr:   u32,
+    options:    libc::c_ulong,
+) -> Option<i64> {
     extern "C" {
         fn getattrlistat(
             fd:          libc::c_int,
@@ -472,8 +506,10 @@ fn getattrlistat_single_size(
         forkattr:    u32,
     }
 
-    // getattrlist packs attributes at 4-byte boundaries with a 4-byte u32
-    // length prefix. The requested off_t is at offset 4 (8 bytes).
+    // getattrlist returns a 4-byte u32 total-length prefix followed by the
+    // requested attributes packed at 4-byte boundaries. For a single off_t that
+    // is [len:u32][value:off_t] = 12 bytes when present, or just [len:u32] = 4
+    // bytes when the filesystem does not supply the attribute.
     let mut buf = [0u8; 12];
 
     let mut al = AttrList {
@@ -482,8 +518,8 @@ fn getattrlistat_single_size(
         commonattr,
         volattr:     0,
         dirattr,
-        fileattr:    0,
-        forkattr:    0,
+        fileattr,
+        forkattr,
     };
 
     let rc = unsafe {
@@ -493,7 +529,7 @@ fn getattrlistat_single_size(
             &mut al as *mut AttrList as *mut libc::c_void,
             buf.as_mut_ptr() as *mut libc::c_void,
             buf.len(),
-            0,
+            options,
         )
     };
 
@@ -501,9 +537,13 @@ fn getattrlistat_single_size(
         return None;
     }
 
-    let bytes: [u8; 8] = buf[4..12].try_into().ok()?;
-    let total = i64::from_ne_bytes(bytes);
-    u64::try_from(total).ok().filter(|&n| n > 0)
+    // The leading length word counts itself; < 12 means the off_t was not
+    // written, i.e. the attribute is unavailable on this filesystem.
+    let len = u32::from_ne_bytes(buf[0..4].try_into().ok()?) as usize;
+    if len < 12 {
+        return None;
+    }
+    Some(i64::from_ne_bytes(buf[4..12].try_into().ok()?))
 }
 
 /// Rule-free recursive byte count using the same parallel fd-relative walker as
@@ -515,7 +555,12 @@ fn fast_tree_bytes(path: &Path) -> u64 {
     let Some(root_stat) = lstat_path(path) else {
         return 0;
     };
-    let own = stat_on_disk_bytes(&root_stat);
+    // The matched root may itself be a regular (cloned) file, so size it
+    // clone-aware too — AT_FDCWD + the full path is the fd-relative form.
+    let own = match CString::new(path.as_os_str().as_bytes()) {
+        Ok(c) => entry_on_disk_bytes(libc::AT_FDCWD, &c, &root_stat),
+        Err(_) => stat_on_disk_bytes(&root_stat),
+    };
     if !mode_is_dir(root_stat.st_mode) {
         return own;
     }
@@ -550,7 +595,7 @@ fn fast_dir_bytes(dir_fd: OwnedFd) -> u64 {
         .into_par_iter()
         .map(|name| {
             let Some(stat) = fstatat_no_follow(raw_fd, &name) else { return 0; };
-            let own = stat_on_disk_bytes(&stat);
+            let own = entry_on_disk_bytes(raw_fd, &name, &stat);
             if mode_is_dir(stat.st_mode) {
                 if let Some(child_fd) = open_dir_at(raw_fd, &name) {
                     return own + fast_dir_bytes(child_fd);
@@ -620,8 +665,33 @@ fn mode_is_dir(mode: libc::mode_t) -> bool {
     mode & libc::S_IFMT == libc::S_IFDIR
 }
 
+fn mode_is_reg(mode: libc::mode_t) -> bool {
+    mode & libc::S_IFMT == libc::S_IFREG
+}
+
 fn stat_on_disk_bytes(stat: &libc::stat) -> u64 {
     on_disk_bytes_from_blocks(stat.st_blocks)
+}
+
+/// On-disk bytes for one already-stat'd entry, opened relative to `parent_fd`.
+///
+/// For a regular file this is the clone-aware *private* size — bytes unique to
+/// the file, i.e. what deleting it actually frees (issue #47) — whenever the
+/// filesystem supplies `ATTR_CMNEXT_PRIVATESIZE`. Otherwise (directories,
+/// symlinks, older macOS, non-APFS, or any error) it is the allocated-block size
+/// from `stat`, which never reports more than today's behaviour (ADR-0006).
+///
+/// Summing private sizes across a subtree can under-count when two clones inside
+/// the same subtree share blocks (those blocks are private to neither file), but
+/// under-counting is the safe direction for a tool that must never overstate what
+/// reclaiming frees.
+fn entry_on_disk_bytes(parent_fd: RawFd, name: &CStr, stat: &libc::stat) -> u64 {
+    if mode_is_reg(stat.st_mode) {
+        if let Some(private) = getattrlistat_private_size(parent_fd, name) {
+            return private;
+        }
+    }
+    stat_on_disk_bytes(stat)
 }
 
 /// One open directory in the depth-first fold. The fd-relative walker yields
@@ -1197,6 +1267,91 @@ mod tests {
                 .iter()
                 .all(|i| i.path.file_name().and_then(|n| n.to_str()) != Some("node_modules")),
             "nested matches under an Item should be pruned"
+        );
+    }
+
+    /// Acceptance for issue #47: a subtree of APFS clones reports the *private*
+    /// (freeable) bytes, not the full logical allocation. The clones share blocks
+    /// via copy-on-write, so deleting the subtree frees roughly one copy's worth —
+    /// and because all references live inside the subtree, the safe under-count
+    /// (ADR-0006 / issue #47) drives the reported size well below even one copy.
+    ///
+    /// Skips gracefully on filesystems without `clonefile(2)`/`PRIVATESIZE` (e.g.
+    /// a non-APFS tmpfs), since macOS defaults to APFS where this runs for real.
+    /// The always-on assertion below covers the sizing path unconditionally.
+    #[test]
+    fn cloned_subtree_reports_private_not_logical_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+
+        const N: usize = 8 * 1024 * 1024; // well above block + dir overhead
+        const CLONES: usize = 4;
+
+        let blob = vec![0xABu8; N];
+
+        // --- Always-on coverage: a plain (non-cloned) file reports its full
+        // allocation, proving the private-size path doesn't under-count the
+        // ordinary case. Runs on every filesystem. ---
+        {
+            let tmp = tempfile::tempdir().unwrap();
+            let plain = tmp.path().join("plain.bin");
+            fs::write(&plain, &blob).unwrap();
+            let measured = fast_tree_bytes(&plain);
+            assert!(
+                measured as usize >= N && (measured as usize) < N + 1024 * 1024,
+                "non-cloned file should report ~its allocation: {measured} vs {N}"
+            );
+        }
+
+        // --- Clone case (APFS only). ---
+        extern "C" {
+            fn clonefile(
+                src: *const libc::c_char,
+                dst: *const libc::c_char,
+                flags: u32,
+            ) -> libc::c_int;
+        }
+        fn cstr(p: &Path) -> CString {
+            CString::new(p.as_os_str().as_bytes()).unwrap()
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let subtree = tmp.path().join("clones");
+        fs::create_dir(&subtree).unwrap();
+        let source = subtree.join("source.bin");
+        fs::write(&source, &blob).unwrap();
+
+        // Skip if this filesystem can't supply per-file private size at all.
+        if getattrlistat_private_size(libc::AT_FDCWD, &cstr(&source)).is_none() {
+            eprintln!("skipping: ATTR_CMNEXT_PRIVATESIZE unavailable on this fs");
+            return;
+        }
+
+        let src_c = cstr(&source);
+        for i in 0..CLONES {
+            let dst = subtree.join(format!("clone_{i}.bin"));
+            let dst_c = cstr(&dst);
+            let rc = unsafe { clonefile(src_c.as_ptr(), dst_c.as_ptr(), 0) };
+            if rc != 0 {
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::ENOTSUP) {
+                    eprintln!("skipping: clonefile unsupported on this fs ({err})");
+                    return;
+                }
+                panic!("clonefile failed: {err}");
+            }
+        }
+
+        let logical = (CLONES + 1) * N; // what naive allocated-block sizing reports
+        let measured = fast_tree_bytes(&subtree) as usize;
+
+        // The clones share one physical copy; every block is referenced by more
+        // than one file, so each file's private size is ~0 and the subtree sizes
+        // far below even a single logical copy — and nowhere near the full
+        // logical allocation it would have reported before issue #47.
+        assert!(
+            measured < N,
+            "cloned subtree should report private bytes (<{N}), got {measured} \
+             (full logical would be {logical})"
         );
     }
 }
